@@ -1,6 +1,6 @@
 // Daily-check → GitHub issue for the maintenance agent: node --no-warnings test-opsreport.js
 const fs = require('fs'), os = require('os'), path = require('path'), http = require('http'), assert = require('assert'), { execFile } = require('child_process');
-const { reportToGitHub, formatIssue, needsAttention, redact } = require('./lib/opsreport');
+const { reportToGitHub, reportRecoveryToGitHub, formatIssue, needsAttention, redact } = require('./lib/opsreport');
 
 const R = (status, extra = {}) => ({ status, time: '2026-11-12T03:00:00.000Z', results: [
   { id: 'trial_balance', title: 'Trial balance', status: 'ok', detail: '' },
@@ -51,6 +51,12 @@ gh.listen(0, async () => {
     issues[0].state = 'closed';
     assert.deepEqual(await reportToGitHub(R('fail', { inv: 'fail' }), opt), { created: 2 });
     console.log('✔ one open ops-report issue at a time: new issue, then comments, new issue after it is closed');
+
+    // recovery goes to the persisted incident issue, not whichever issue is currently open
+    assert.deepEqual(await reportRecoveryToGitHub('2026-11-12T04:00:00.000Z', { ...opt, issueNumber: 1 }), { commented: 1 });
+    const recoveryCall = calls.at(-1);
+    assert.match(recoveryCall.u, /\/issues\/1\/comments$/);
+    console.log('✔ recovery is posted to the specific incident issue');
 
     // end to end: the CLI on a broken database reports to GitHub and still writes the local report
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'erp-opsrep-'));
