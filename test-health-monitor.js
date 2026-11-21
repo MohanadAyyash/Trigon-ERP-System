@@ -26,7 +26,8 @@ const server = http.createServer((req, res) => {
     if (url.pathname === '/api/repos/o/r/issues' && req.method === 'POST') {
       const issue = { number: issues.length + 1, state: 'open', ...JSON.parse(body) }; issues.push(issue); return json(201, issue);
     }
-    if (/^\/api\/repos\/o\/r\/issues\/\d+\/comments$/.test(url.pathname)) { comments.push(JSON.parse(body)); return json(201, { id: comments.length }); }
+    const commentMatch = /^\/api\/repos\/o\/r\/issues\/(\d+)\/comments$/.exec(url.pathname);
+    if (commentMatch) { comments.push({ issueNumber: Number(commentMatch[1]), body: JSON.parse(body).body }); return json(201, { id: comments.length }); }
     json(404, { error: 'not found' });
   });
 });
@@ -59,15 +60,21 @@ server.listen(0, '127.0.0.1', async () => {
     assert.equal(stillDown.changed, false); assert.equal(issues.length, 1); assert.equal(teams.length, 1);
     console.log('✔ outage opens one GitHub issue and sends one Teams alert');
 
+    issues[0].state = 'closed';
+    issues.push({ number: 2, state: 'open', title: 'Unrelated daily check', body: '' });
     healthy = true;
     failNextRecovery = true;
     const recovered = await runMonitor({ env, fetchImpl: fetch, now });
     assert.equal(recovered.status, 'ok'); assert.equal(recovered.errors.length, 1); assert.equal(teams.length, 1);
-    assert.equal(comments.length, 1); assert.match(comments[0].body, /responding again/);
+    assert.equal(comments.length, 1); assert.equal(comments[0].issueNumber, 1); assert.match(comments[0].body, /responding again/);
     await runMonitor({ env, fetchImpl: fetch, now });
     assert.equal(teams.length, 2); assert.match(teams[1].attachments[0].content.body[0].text, /recovered/);
     await runMonitor({ env, fetchImpl: fetch, now });
     assert.equal(teams.length, 2); assert.equal(comments.length, 1);
+    const log = fs.readFileSync(path.join(dataDir, 'ops', 'health-monitor.log'), 'utf8');
+    assert.match(log, /GitHub incident reported/);
+    assert.match(log, /GitHub recovery recorded/);
+    assert.match(log, /Teams recovery alert sent/);
     console.log('✔ failed recovery notifications retry once delivered; incident issues are not auto-closed');
 
     const unhealthy = await probeHealth(port, { fetchImpl: async () => new Response('bad', { status: 503 }) });

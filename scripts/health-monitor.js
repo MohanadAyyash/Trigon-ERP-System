@@ -43,7 +43,7 @@ async function runMonitor({ appDir = APP_DIR, env = process.env, fetchImpl = glo
   const stateFile = path.join(opsDir, STATE_NAME);
   const previous = readState(stateFile);
   const checkedAt = now().toISOString();
-  const health = await probeHealth(port, { fetchImpl });
+  const health = await probeHealth(port, { host: env.HOST, fetchImpl });
   const status = health.ok ? 'ok' : 'fail';
   const changed = !previous || previous.status !== status;
   const recovering = status === 'ok' && previous?.status === 'fail';
@@ -52,6 +52,7 @@ async function runMonitor({ appDir = APP_DIR, env = process.env, fetchImpl = glo
       status,
       since: checkedAt,
       githubNotified: recovering && previous.githubNotified,
+      githubIssueNumber: previous?.githubIssueNumber,
       teamsNotified: recovering && previous.teamsNotified,
       recoveryPending: recovering,
       recoveryGithubNotified: false,
@@ -63,12 +64,15 @@ async function runMonitor({ appDir = APP_DIR, env = process.env, fetchImpl = glo
   if (status === 'fail') {
     if (env.GITHUB_REPORT_TOKEN && env.GITHUB_REPORT_REPO && !state.githubNotified) {
       try {
-        await reportToGitHub({
+        const report = await reportToGitHub({
           source: 'health-monitor',
           status: 'fail',
           time: checkedAt,
           results: [{ id: 'server_health', title: 'ERP server health', status: 'fail', detail: health.detail }],
         }, { token: env.GITHUB_REPORT_TOKEN, repo: env.GITHUB_REPORT_REPO, api: env.GITHUB_REPORT_API, fetch: fetchImpl });
+        const issueNumber = report?.created || report?.commented;
+        if (!issueNumber) throw new Error(report?.skipped || 'GitHub incident report was not recorded');
+        state.githubIssueNumber = issueNumber;
         state.githubNotified = true;
         events.push('GitHub incident reported');
       } catch {
@@ -91,12 +95,14 @@ async function runMonitor({ appDir = APP_DIR, env = process.env, fetchImpl = glo
   } else if (state.recoveryPending) {
     if (env.GITHUB_REPORT_TOKEN && env.GITHUB_REPORT_REPO && state.githubNotified && !state.recoveryGithubNotified) {
       try {
-        await reportRecoveryToGitHub(checkedAt, {
+        const recovery = await reportRecoveryToGitHub(checkedAt, {
           token: env.GITHUB_REPORT_TOKEN,
           repo: env.GITHUB_REPORT_REPO,
+          issueNumber: state.githubIssueNumber,
           api: env.GITHUB_REPORT_API,
           fetch: fetchImpl,
         });
+        if (!recovery.commented) throw new Error(recovery.skipped || 'GitHub recovery report was not recorded');
         state.recoveryGithubNotified = true;
         events.push('GitHub recovery recorded');
       } catch {
@@ -123,7 +129,8 @@ async function runMonitor({ appDir = APP_DIR, env = process.env, fetchImpl = glo
 
   writeState(stateFile, state);
   if (changed || errors.length || events.length) appendLog(path.join(opsDir, 'health-monitor.log'), [
-    ...(changed ? [`Health ${status.toUpperCase()}: ${health.detail}`, ...events] : []),
+    ...(changed ? [`Health ${status.toUpperCase()}: ${health.detail}`] : []),
+    ...events,
     ...errors.map(x => `Notification error: ${x}`),
   ]);
   return { ok: health.ok, changed, status, detail: health.detail, events, errors };
