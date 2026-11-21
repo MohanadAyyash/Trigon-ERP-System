@@ -5,7 +5,7 @@ process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'erp-sales-'));
 process.env.SALES_NO_SCHEDULER = '1';
 const legacyDb = new DatabaseSync(path.join(process.env.DATA_DIR, 'erp.db'));
 legacyDb.exec('CREATE TABLE boq_items(id INTEGER PRIMARY KEY, project_id INTEGER, section TEXT, description TEXT, unit TEXT, qty REAL DEFAULT 0, rate REAL DEFAULT 0, cost_rate REAL DEFAULT 0, done_pct REAL DEFAULT 0, billed_pct REAL DEFAULT 0)');
-legacyDb.prepare("INSERT INTO boq_items(id,project_id,section,description,qty,rate,done_pct,billed_pct) VALUES(999,999,'Provisional items','Legacy provisional',1,50,75,25)").run();
+legacyDb.exec("INSERT INTO boq_items(id,project_id,section,description,qty,rate,done_pct,billed_pct) VALUES (999,999,'Provisional items','Legacy contractual candidate',1,50,75,25), (1000,999,'Provisional items','Legacy provisional candidate',1,25,40,0)");
 legacyDb.close();
 const { server } = require('./server.js');
 
@@ -17,9 +17,11 @@ server.listen(0, async () => {
   const SIG = 'data:image/png;base64,' + 'iVBORw0KGgo' + 'A'.repeat(400) + '=';
   try {
     ok(await call('POST', 'setup', { username: 'admin', password: 'secret12', company: 'Trigon' }));
-    const legacy = ok(await call('GET', 'boq_items/999'));
-    assert.equal(legacy.provisional, 1, 'existing provisional BOQ items are safely flagged during migration');
-    assert.equal(legacy.done_pct, 75); assert.equal(legacy.billed_pct, 25, 'migration preserves historical progress and billed values');
+    const legacyContract = ok(await call('GET', 'boq_items/999')), legacyProvisional = ok(await call('GET', 'boq_items/1000'));
+    assert.equal(legacyContract.section, 'Provisional items'); assert.equal(legacyProvisional.section, 'Provisional items');
+    assert.equal(legacyContract.provisional, null); assert.equal(legacyProvisional.provisional, null, 'section text alone does not classify legacy rows');
+    assert.equal(legacyContract.done_pct, 75); assert.equal(legacyContract.billed_pct, 25, 'schema migration preserves historical progress and billed values');
+    assert.equal(legacyProvisional.done_pct, 40); assert.equal(legacyProvisional.billed_pct, 0);
     ok(await call('PUT', 'settings', { trn: '100123456700003', terms: 'Payment 30 days' }));
     const cl = ok(await call('POST', 'parties', { type: 'client', name: 'Al Waha Developments', trn: '100234567800003', address: 'Dubai South' })).id;
 

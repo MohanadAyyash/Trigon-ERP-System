@@ -34,14 +34,13 @@ CREATE TABLE IF NOT EXISTS employees(id INTEGER PRIMARY KEY, name TEXT NOT NULL,
   basic REAL DEFAULT 0, housing REAL DEFAULT 0, other_allowance REAL DEFAULT 0, bank_name TEXT, routing_code TEXT, iban TEXT, project_id INTEGER, eid_expiry TEXT, visa_expiry TEXT, passport_expiry TEXT, card_expiry TEXT, notes TEXT);
 CREATE TABLE IF NOT EXISTS payroll(id INTEGER PRIMARY KEY, month TEXT, employee_id INTEGER, project_id INTEGER, days_worked REAL DEFAULT 30, leave_days REAL DEFAULT 0, ot_normal_hours REAL DEFAULT 0, ot_special_hours REAL DEFAULT 0,
   bonus REAL DEFAULT 0, deductions REAL DEFAULT 0, fixed REAL DEFAULT 0, overtime REAL DEFAULT 0, gross REAL DEFAULT 0, net REAL DEFAULT 0, status TEXT DEFAULT 'draft', paid_date TEXT, notes TEXT, UNIQUE(month, employee_id));
-CREATE TABLE IF NOT EXISTS boq_items(id INTEGER PRIMARY KEY, project_id INTEGER, section TEXT, description TEXT, unit TEXT, qty REAL DEFAULT 0, rate REAL DEFAULT 0, cost_rate REAL DEFAULT 0, done_pct REAL DEFAULT 0, billed_pct REAL DEFAULT 0, provisional INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS boq_items(id INTEGER PRIMARY KEY, project_id INTEGER, section TEXT, description TEXT, unit TEXT, qty REAL DEFAULT 0, rate REAL DEFAULT 0, cost_rate REAL DEFAULT 0, done_pct REAL DEFAULT 0, billed_pct REAL DEFAULT 0, provisional INTEGER);
 CREATE TABLE IF NOT EXISTS variations(id INTEGER PRIMARY KEY, project_id INTEGER, number TEXT, date TEXT, description TEXT, amount REAL DEFAULT 0, status TEXT DEFAULT 'pending');
 CREATE TABLE IF NOT EXISTS site_reports(id INTEGER PRIMARY KEY, project_id INTEGER, date TEXT, weather TEXT, labour_count INTEGER DEFAULT 0, work_done TEXT, issues TEXT, notes TEXT);
 CREATE TABLE IF NOT EXISTS audit_log(id INTEGER PRIMARY KEY, ts TEXT, user TEXT, action TEXT, tbl TEXT, rec INTEGER, detail TEXT);
 `);
 const addCol = (t, c, d) => { if (!db.prepare(`PRAGMA table_info(${t})`).all().some(x => x.name === c)) db.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${d}`); };
-[['quotes','attention','TEXT'],['quotes','location','TEXT'],['quotes','plot_no','TEXT'],['quotes','noc_ref','TEXT'],['quotes','scope','TEXT'],['quotes','contract_basis','TEXT'],['quotes','payment_terms','TEXT'],['users','totp_secret','TEXT'],['sessions','method','TEXT'],['users','totp_on','INTEGER DEFAULT 0'],['users','totp_last','INTEGER DEFAULT 0'],['users','display_name','TEXT'],['users','job_title','TEXT'],['users','mobile','TEXT'],['users','employee_id','INTEGER'],['payments','reconciled','INTEGER DEFAULT 0'],['users','role',"TEXT DEFAULT 'admin'"],['projects','retention_pct','REAL DEFAULT 0'],['parties','bank_name','TEXT'],['parties','iban','TEXT'],['projects','emirate',"TEXT DEFAULT 'dubai'"],['invoices','kind',"TEXT DEFAULT 'invoice'"],['invoices','original_id','INTEGER'],['invoices','voided','INTEGER DEFAULT 0'],['invoices','void_reason','TEXT'],['payments','cheque_date','TEXT'],['payments','cheque_status',"TEXT DEFAULT 'cleared'"],['boq_items','provisional','INTEGER DEFAULT 0']].forEach(a => addCol(...a));
-db.exec("UPDATE boq_items SET provisional=1 WHERE lower(trim(coalesce(section,'')))='provisional items' AND coalesce(provisional,0)=0");
+[['quotes','attention','TEXT'],['quotes','location','TEXT'],['quotes','plot_no','TEXT'],['quotes','noc_ref','TEXT'],['quotes','scope','TEXT'],['quotes','contract_basis','TEXT'],['quotes','payment_terms','TEXT'],['users','totp_secret','TEXT'],['sessions','method','TEXT'],['users','totp_on','INTEGER DEFAULT 0'],['users','totp_last','INTEGER DEFAULT 0'],['users','display_name','TEXT'],['users','job_title','TEXT'],['users','mobile','TEXT'],['users','employee_id','INTEGER'],['payments','reconciled','INTEGER DEFAULT 0'],['users','role',"TEXT DEFAULT 'admin'"],['projects','retention_pct','REAL DEFAULT 0'],['parties','bank_name','TEXT'],['parties','iban','TEXT'],['projects','emirate',"TEXT DEFAULT 'dubai'"],['invoices','kind',"TEXT DEFAULT 'invoice'"],['invoices','original_id','INTEGER'],['invoices','voided','INTEGER DEFAULT 0'],['invoices','void_reason','TEXT'],['payments','cheque_date','TEXT'],['payments','cheque_status',"TEXT DEFAULT 'cleared'"],['boq_items','provisional','INTEGER']].forEach(a => addCol(...a));
 
 // Editable columns per table (whitelist) and numeric columns
 const bad = m => { const e = new Error(m); e.status = 400; throw e; };
@@ -65,6 +64,7 @@ const TABLES = {
 };
 
 const round = n => Math.round((n + Number.EPSILON) * 100) / 100;
+const ambiguousProvisional = i => i.provisional == null && String(i.section || '').trim().toLowerCase() === 'provisional items';
 const getSettings = () => Object.fromEntries(db.prepare('SELECT key,value FROM settings').all().map(r => [r.key, r.value]));
 const today = () => { const d = new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10); };   // local date (UTC would still be yesterday before 4am in the UAE)
 const all = (t) => db.prepare(`SELECT * FROM ${t} ORDER BY id DESC`).all();
@@ -189,12 +189,13 @@ function projectRows() {
     const eos = ctx.projectEosCost ? ctx.projectEosCost(p.id) : 0;      // end-of-service provision of the staff on this project
     if (eos) byCat.eos = eos;
     const vars = round(db.prepare("SELECT COALESCE(SUM(amount),0) a FROM variations WHERE project_id=? AND status='approved'").get(p.id).a);
-    const boq = db.prepare('SELECT * FROM boq_items WHERE project_id=?').all(p.id), contractBoq = boq.filter(i => !i.provisional), provisionalBoq = boq.filter(i => i.provisional);
+    const boq = db.prepare('SELECT * FROM boq_items WHERE project_id=?').all(p.id), reviewBoq = boq.filter(ambiguousProvisional), contractBoq = boq.filter(i => !i.provisional && !ambiguousProvisional(i)), provisionalBoq = boq.filter(i => i.provisional === 1);
     const boqValue = round(contractBoq.reduce((x, i) => x + i.qty * i.rate, 0)), boqCost = round(contractBoq.reduce((x, i) => x + i.qty * i.cost_rate, 0));
     const provisionalBoqValue = round(provisionalBoq.reduce((x, i) => x + i.qty * i.rate, 0)), provisionalBoqCost = round(provisionalBoq.reduce((x, i) => x + i.qty * i.cost_rate, 0));
+    const reviewBoqValue = round(reviewBoq.reduce((x, i) => x + i.qty * i.rate, 0)), reviewBoqCost = round(reviewBoq.reduce((x, i) => x + i.qty * i.cost_rate, 0));
     const earned = round(contractBoq.reduce((x, i) => x + i.qty * i.rate * i.done_pct / 100, 0));
     const revised = round(p.contract_value + vars);
-    return { ...p, variations: vars, revised_value: revised, boq_value: boqValue, provisional_boq_value: provisionalBoqValue, boq_budget_cost: boqCost, provisional_boq_budget_cost: provisionalBoqCost, boq_earned: earned, boq_progress: boqValue ? round(earned / boqValue * 100) : 0, invoiced, collected, receivable: round(inv.reduce((s, i) => s + i.balance + i.retention_open, 0)),
+    return { ...p, variations: vars, revised_value: revised, boq_value: boqValue, provisional_boq_value: provisionalBoqValue, boq_review_value: reviewBoqValue, boq_budget_cost: boqCost, provisional_boq_budget_cost: provisionalBoqCost, boq_review_budget_cost: reviewBoqCost, boq_earned: earned, boq_progress: boqValue ? round(earned / boqValue * 100) : 0, invoiced, collected, receivable: round(inv.reduce((s, i) => s + i.balance + i.retention_open, 0)),
       retention_held: round(inv.reduce((s, i) => s + i.retention_open, 0)),
       cost, payable: round(bl.reduce((s, b) => s + b.balance, 0)), profit: round(invoiced - cost),
       margin: invoiced ? round((invoiced - cost) / invoiced * 100) : 0,
@@ -793,7 +794,7 @@ async function api(req, res, url) {
     const proj = db.prepare('SELECT * FROM projects WHERE id=?').get(+b);
     if (!proj) return send(res, 404, { error: 'not found' });
     const st = getSettings(); if (st.vat_registered !== '0' && !C.validTrn(st.trn)) bad('Enter your company TRN (15 digits) in Settings before issuing tax invoices');
-    const lines = db.prepare('SELECT * FROM boq_items WHERE project_id=? AND COALESCE(provisional,0)=0 AND done_pct>billed_pct+0.0001 ORDER BY id').all(+b);
+    const lines = db.prepare("SELECT * FROM boq_items WHERE project_id=? AND (provisional=0 OR (provisional IS NULL AND lower(trim(coalesce(section,'')))!='provisional items')) AND done_pct>billed_pct+0.0001 ORDER BY id").all(+b);
     if (!lines.length) bad('No unbilled progress — update the completion % on the BOQ first');
     const x = await readBody(req).catch(() => ({})), date = x && x.date ? x.date : today();          // optional certificate date (end of the valuation period)
     if (!/^\d{4}-\d\d-\d\d$/.test(date)) bad('Invalid date');
@@ -803,7 +804,7 @@ async function api(req, res, url) {
     const r = db.prepare('INSERT INTO invoices(number,date,project_id,items,vat_pct,retention_pct,notes) VALUES(?,?,?,?,?,?,?)')
       .run(nextNumber('invoices', 'INV'), date, proj.id, JSON.stringify(items), (st.vat_registered === '0' ? 0 : +st.vat_pct || 5), proj.retention_pct || 0, 'Progress invoice');
     if (ctx.ipcSnapshot) ctx.ipcSnapshot(proj.id, Number(r.lastInsertRowid));   // payment certificate: previous / this period / cumulative per BOQ item
-    db.prepare('UPDATE boq_items SET billed_pct=done_pct WHERE project_id=? AND COALESCE(provisional,0)=0 AND done_pct>billed_pct+0.0001').run(+b);   // only the contract lines on this invoice: a line corrected downwards keeps what was billed
+    db.prepare("UPDATE boq_items SET billed_pct=done_pct WHERE project_id=? AND (provisional=0 OR (provisional IS NULL AND lower(trim(coalesce(section,'')))!='provisional items')) AND done_pct>billed_pct+0.0001").run(+b);   // only the contract lines on this invoice: a line corrected downwards keeps what was billed
     audit(req, 'create', 'progress_invoice', Number(r.lastInsertRowid), `project ${proj.name}`);
     return send(res, 200, { id: Number(r.lastInsertRowid) });
   }
@@ -869,7 +870,7 @@ async function api(req, res, url) {
     const guardInvoice = () => { const st = getSettings(); if (a === 'invoices' && st.vat_registered !== '0' && !C.validTrn(st.trn)) bad('Enter your company TRN (15 digits) in Settings before issuing tax invoices'); };
     if (method === 'POST') {
       const row = clean(a, await readBody(req));
-      if (a === 'boq_items' && String(row.section || '').trim().toLowerCase() === 'provisional items') row.provisional = 1;
+      if (a === 'boq_items' && row.provisional === undefined) row.provisional = 0;
       guardInvoice(); spec.check?.(row);
       if (a === 'payments') checkPayment(row, null);
       if (a === 'invoices' && row.number && db.prepare('SELECT 1 FROM invoices WHERE number=?').get(row.number)) bad(`Invoice number ${row.number} already exists`);
@@ -884,11 +885,14 @@ async function api(req, res, url) {
       return send(res, 200, { id: Number(r.lastInsertRowid) });
     }
     if (method === 'PUT' && id) {
-      let row = clean(a, await readBody(req));
+      const input = await readBody(req);
+      let row = clean(a, input);
       if (a === 'boq_items' && me.role === 'site_engineer') row = 'done_pct' in row ? { done_pct: row.done_pct } : {};
       if (a === 'boq_items') {
-        if (String(row.section || '').trim().toLowerCase() === 'provisional items') row.provisional = 1;
-        const cur = db.prepare('SELECT provisional FROM boq_items WHERE id=?').get(id);
+        const cur = db.prepare('SELECT section, provisional FROM boq_items WHERE id=?').get(id);
+        const ambiguous = cur && ambiguousProvisional(cur);
+        const changingDefinition = Object.keys(row).some(k => k !== 'done_pct');
+        if (me.role !== 'site_engineer' && ambiguous && changingDefinition && ![0, 1, '0', '1'].includes(input.provisional)) bad('Classify this legacy BOQ item as contractual or provisional before editing it');
         if (cur?.provisional && row.provisional === 0) bad('A provisional BOQ item cannot be billed directly — record instructed work as an approved variation');
       }
       const ks = Object.keys(row);

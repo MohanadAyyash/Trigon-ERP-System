@@ -542,6 +542,8 @@ Click the project to open it. You see:
 - Figures: **Contract value**, **Approved variations**, **Revised value**, **Invoiced**, **Billed %**, **Collected**, **Receivable**, **Cost**, **Profit**, **Margin**.
 - Buttons: **Edit**, **Progress invoice from BOQ**, **+ Invoice**, **+ Expense**.
 
+Older BOQ items whose section text is exactly `Provisional items` need an explicit classification because that section name alone cannot tell whether the item is contractual or provisional. They remain outside totals and billing until you open each item and classify it.
+
 <!--img-->
 
 **📷 Project page**

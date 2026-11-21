@@ -2,7 +2,7 @@
 const fs = require('fs'), os = require('os'), path = require('path'), assert = require('assert');
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'erp-ipc-'));
 process.env.ZOHO_NO_SCHEDULER = '1'; process.env.SALES_NO_SCHEDULER = '1';
-const { server } = require('./server.js');
+const { server, ctx } = require('./server.js');
 
 server.listen(0, async () => {
   const base = `http://localhost:${server.address().port}/api/`; let cookie = '';
@@ -96,6 +96,27 @@ server.listen(0, async () => {
     assert.equal(app.work, 10000);
     assert.equal((await call('POST', `projects/${pp}/progress-invoice`, {})).s, 400, 'provisional completion alone creates no second invoice');
     out.push('provisional BOQ: site progress retained; progress invoice, IPC, payment application and contract BOQ totals exclude it');
+
+    // ---- a legacy section name is ambiguous; leave rows unchanged and require explicit classification
+    const lp = ok(await call('POST', 'projects', { name: 'Legacy BOQ review', client_id: cl, contract_value: 200, status: 'active' })).id;
+    const legacyContractId = ok(await call('POST', 'boq_items', { project_id: lp, section: 'Provisional items', description: 'Contractual candidate', qty: 1, rate: 100 })).id;
+    const legacyProvisionalId = ok(await call('POST', 'boq_items', { project_id: lp, section: 'Provisional items', description: 'Provisional candidate', qty: 1, rate: 100 })).id;
+    ctx.db.prepare("UPDATE boq_items SET provisional=NULL, done_pct=100 WHERE id IN (?,?)").run(legacyContractId, legacyProvisionalId);
+    const candidates = ok(await call('GET', `boq_items?project_id=${lp}`));
+    assert.ok(candidates.every(x => x.provisional === null), 'legacy section label alone remains unclassified');
+    assert.equal((await call('PUT', `boq_items/${legacyContractId}`, { done_pct: 100 })).s, 200, 'site progress remains editable before classification');
+    assert.equal((await call('PUT', `boq_items/${legacyContractId}`, { section: 'Contract' })).s, 400, 'edits require explicit classification');
+    assert.equal((await call('POST', `projects/${lp}/progress-invoice`, {})).s, 400, 'ambiguous legacy rows cannot be billed automatically');
+    assert.equal((await call('POST', 'claims/apps', { project_id: lp })).s, 400, 'ambiguous legacy rows cannot enter payment applications');
+    const legacySummary = ok(await call('GET', 'project-summary')).find(x => x.id === lp);
+    assert.equal(legacySummary.boq_review_value, 200); assert.equal(legacySummary.boq_value, 0);
+    ok(await call('PUT', `boq_items/${legacyContractId}`, { provisional: 0 }));
+    ok(await call('PUT', `boq_items/${legacyProvisionalId}`, { provisional: 1 }));
+    const legacyInvoice = ok(await call('POST', `projects/${lp}/progress-invoice`, {}));
+    assert.deepEqual(ok(await call('GET', `invoices/${legacyInvoice.id}`)).items.map(x => x.description), ['Contractual candidate (0% → 100%)']);
+    const legacyIpc = ok(await call('GET', `invoices/${legacyInvoice.id}/certificate`));
+    assert.deepEqual(legacyIpc.lines.map(x => x.description), ['Contractual candidate']);
+    out.push('legacy BOQ: section-label matches stay unchanged and non-billable until explicit classification');
 
     // money view only
     ok(await call('POST', 'users', { username: 'fm1', password: 'pass1234', role: 'foreman' }));

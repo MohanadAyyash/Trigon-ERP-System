@@ -33,7 +33,7 @@ module.exports = ctx => {
     const claimed = J(app.lines).some(l => {
       const m = /^b(\d+)$/.exec(String(l.key));
       if (!m || num(l.cum_qty) <= num(l.prev_qty) + 0.0001) return false;
-      return !!db.prepare('SELECT 1 FROM boq_items WHERE id=? AND project_id=? AND COALESCE(provisional,0)=1').get(+m[1], app.project_id);
+      return !!db.prepare("SELECT 1 FROM boq_items WHERE id=? AND project_id=? AND (provisional=1 OR (provisional IS NULL AND lower(trim(coalesce(section,'')))='provisional items'))").get(+m[1], app.project_id);
     });
     if (claimed) bad('Provisional BOQ items cannot be claimed directly — record instructed work as an approved variation');
   }
@@ -99,7 +99,7 @@ module.exports = ctx => {
   }
   function newLines(pid) {
     const prev = lastPc(pid), cert = {}; for (const l of J(prev && prev.lines)) cert[l.key] = +l.cert_qty || 0;
-    const boq = db.prepare('SELECT * FROM boq_items WHERE project_id=? AND COALESCE(provisional,0)=0 ORDER BY id').all(pid).map((i, n) => {
+    const boq = db.prepare("SELECT * FROM boq_items WHERE project_id=? AND (provisional=0 OR (provisional IS NULL AND lower(trim(coalesce(section,'')))!='provisional items')) ORDER BY id").all(pid).map((i, n) => {
       const key = 'b' + i.id, pq = key in cert ? cert[key] : round(i.qty * (i.billed_pct || 0) / 100);
       return { key, boq_id: i.id, item: String(n + 1), section: i.section || '', description: i.description, unit: i.unit || '', qty: i.qty, rate: i.rate, prev_qty: pq, cum_qty: (i.done_pct || 0) > (i.billed_pct || 0) + 0.0001 ? Math.max(pq, round(i.qty * i.done_pct / 100)) : pq };   // only new progress moves the quantity
     });
