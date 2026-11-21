@@ -402,11 +402,17 @@ module.exports = ctx => {
           const parts = r ? split(r) : [{ project_id: null, amount: 1 }], sum = parts.reduce((s, p) => s + p.amount, 0) || 1;
           for (const p of parts) byProj[p.project_id] = (byProj[p.project_id] || 0) + v.amount * p.amount / sum;
         }
-        // the project shares are rounded one by one: the cent left over goes to the largest share, so the journal balances
-        const shares = add(byProj, 5260, 5260, 'debit', 'End-of-service provision'), cent = round(round(total) - shares.reduce((s, l) => s + l.amount, 0));
-        if (cent && shares.length) { const big = shares.reduce((x, l) => (l.amount > x.amount ? l : x)); big.amount = round(big.amount + cent); }
+        // Floor each share, then assign the remaining cents to the largest fractional shares.
+        const targetCents = Math.round(round(total) * 100), shares = Object.entries(byProj).map(([p, a], index) => {
+          if (!Number.isFinite(a) || a < 0) throw new Error(`invalid end-of-service project allocation for ${m.month}`);
+          const rawCents = a * 100, cents = Math.floor(rawCents + Number.EPSILON * Math.max(1, rawCents));
+          return { p, index, cents, remainder: Math.max(0, rawCents - cents) };
+        }), residual = targetCents - shares.reduce((s, l) => s + l.cents, 0);
+        if (residual < 0 || residual > shares.length) throw new Error(`end-of-service project allocations cannot be balanced to cents for ${m.month}`);
+        for (const l of shares.slice().sort((a, b) => b.remainder - a.remainder || a.index - b.index).slice(0, residual)) l.cents++;
+        const lines = shares.filter(l => l.cents > 0).map(l => ({ acct: 5260, dc: 'debit', amount: l.cents / 100, project_id: l.p === 'null' ? null : +l.p, desc: 'End-of-service provision' }));
         out.push({ kind: 'jv_eos', local_id: ym(m.month), date: mEnd(m.month), ref: `EOS-${m.month}`, notes: `End-of-service provision ${m.month}`,
-          lines: [...shares, { acct: 2300, dc: 'credit', amount: round(total), desc: 'End-of-service provision' }] });
+          lines: [...lines, { acct: 2300, dc: 'credit', amount: round(total), desc: 'End-of-service provision' }] });
       }
       for (const s of db.prepare('SELECT s.*, e.name, e.project_id FROM eos_settlements s JOIN employees e ON e.id=s.employee_id').all()) {
         if (!inR(s.date)) continue; const diff = round(s.gratuity - s.provision);
@@ -501,6 +507,7 @@ module.exports = ctx => {
       if ((vatPending() || !lk.std) && codes.some(c => c === '1200' || c === '2100')) throw held('VAT_PENDING', `${j.ref} moves VAT (1200 / 2100); VAT is not configured in Zoho yet — held`);
     }
     if (j.invoice) { const ir = rec('invoice', j.invoice); if (!ir || ir.status !== 'ok') { note(j.kind, j.local_id, j.ref, 'skip', 'waits until its invoice is in Zoho'); return; } }          // retention follows its invoice: not sent / not updated while the invoice is not in step
+    if (j.lines.some(l => l.amount < 0)) throw new Error(`journal ${j.ref} has a negative line amount — not sent; report this to the developer`);
     const lines = [];
     for (const l of j.lines.filter(l => l.amount > 0.004)) {
       const acc = j.codes ? zAcct(l.acct, lk, l.partner) : l.acct === 'bank' ? (mapOf('account', 'acct:1000') || (lk.bank || {}).account_id) : l.acct === 'cash' ? (mapOf('account', 'acct:1020') || (lk.cash || lk.bank || {}).account_id)
