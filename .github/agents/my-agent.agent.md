@@ -4,7 +4,7 @@ description: Diagnoses and fixes bugs reported in GitHub issues.
 tools:
   - read
   - edit
-  - terminal
+  - execute
   - search
 ---
 
