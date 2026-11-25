@@ -40,8 +40,39 @@ server.listen(0, async () => {
     assert.ok(roster.includes(emp) && !roster.includes(emp2), 'roster limited to own crew');
     assert.equal((await as('siteengineer', () => call('GET', 'boq_items'))).j.every(i => i.project_id === p), true);
 
+    const SE_ = 'siteengineer';
+    // ---- printed documents (/api/doc/<kind>/<id>) follow the project scope centrally, whatever a role may print. The site roles print
+    // only RFQs today; to test the guard itself, the site engineer is given read access to more documents for this block only.
+    {
+      const { ACL } = require('./lib/acl'), granted = ['purchase_orders', 'invoices', 'subcontracts', 'sub_certs', 'claims', 'statement', 'payroll'];
+      const po1 = (await call('POST', 'purchase_orders', { party_id: sup, project_id: p, status: 'sent', items: [{ description: 'x', qty: 1, rate: 1 }] })).j.id;
+      const po2 = (await call('POST', 'purchase_orders', { party_id: sup, project_id: p2, status: 'sent', items: [{ description: 'y', qty: 1, rate: 1 }] })).j.id;
+      const inv1 = (await call('POST', 'invoices', { project_id: p, items: [{ description: 'a', qty: 1, rate: 10 }] })).j.id, inv2 = (await call('POST', 'invoices', { project_id: p2, items: [{ description: 'b', qty: 1, rate: 10 }] })).j.id;
+      const sc1 = (await call('POST', 'subcontracts', { project_id: p, party_id: sup, description: 'Kerbs', contract_value: 1000 })).j.id, sc2 = (await call('POST', 'subcontracts', { project_id: p2, party_id: sup, description: 'Paving', contract_value: 1000 })).j.id;
+      const cert2 = (await call('POST', 'sub_certs', { subcontract_id: sc2, cumulative: 100, retention_pct: 5 })).j.id;
+      const rq1 = (await call('POST', 'rfqs', { project_id: p, description: 'R1', items: [{ description: 'k', unit: 'm', qty: 1 }] })).j.id, rq2 = (await call('POST', 'rfqs', { project_id: p2, description: 'R2', items: [{ description: 'k', unit: 'm', qty: 1 }] })).j.id;
+      assert.equal((await call('PUT', 'boq_items/' + bq2, { done_pct: 50 })).s, 200); const pinv2 = (await call('POST', `projects/${p2}/progress-invoice`)).j.id; assert.ok(pinv2, 'progress invoice (IPC) on the other project');
+      for (const g of granted) ACL[g][0].push('site_engineer');
+      try {
+        for (const [u, label] of [[`doc/purchase_orders/${po2}`, 'PO'], [`doc/purchase_orders/${po2}/pdf`, 'PO PDF'], [`doc/invoices/${inv2}`, 'invoice'], [`doc/sc_agreement/${sc2}`, 'subcontract agreement'],
+          [`doc/sub_certs/${cert2}`, 'subcontractor certificate'], [`doc/ipc/${pinv2}`, 'IPC'], [`doc/rfqs/${rq2}`, 'RFQ'], [`doc/rfqs/${rq2}/pdf`, 'RFQ PDF']])
+          await expect(SE_, 'GET', u, null, 403, `other project's ${label}`);
+        for (const u of [`doc/purchase_orders/${po1}`, `doc/invoices/${inv1}`, `doc/sc_agreement/${sc1}`, `doc/rfqs/${rq1}`]) await expect(SE_, 'GET', u, null, 200, 'own project');
+        // documents that belong to no project (statements, payslips…): refused to a project-limited user, even with the role's read right
+        await expect(SE_, 'GET', `doc/statement/${sup}`, null, 403, 'statement'); await expect(SE_, 'GET', `doc/payslips/1`, null, 403, 'payslip');
+        await expect(SE_, 'GET', `doc/purchase_orders/abc`, null, 403, 'no record id');
+        await expect(SE_, 'GET', `doc/purchase_orders/999999`, null, 404, 'missing record: not found as before');
+      } finally { for (const g of granted) ACL[g][0].splice(ACL[g][0].lastIndexOf('site_engineer'), 1); }
+      for (const g of granted) assert.ok(!ACL[g][0].includes('site_engineer'), 'test grants removed');
+      // exports (/api/export/<kind>): a project-limited user gets none (the projects export lists every project with contract, cost and profit)
+      for (const u of ['siteengineer', 'foreman']) for (const k of ['projects', 'invoices', 'bills', 'payments', 'parties', 'employees', 'nonexistent']) await expect(u, 'GET', `export/${k}`, null, 403, 'export ' + k);
+      await expect('admin', 'GET', 'export/projects', null, 200, 'administrator export');
+      // unlimited users are unchanged
+      for (const u of [`doc/purchase_orders/${po2}`, `doc/invoices/${inv2}`, `doc/ipc/${pinv2}`]) await expect('admin', 'GET', u, null, 200, 'administrator');
+    }
+
     // ---- site engineer: progress, site diary, crews, material requests — no money
-    const SE = 'siteengineer';
+    const SE = SE_;
     await expect(SE, 'GET', 'projects', null, 200);
     for (const u of ['project-summary', 'dashboard', 'invoices', 'bills', 'payroll?month=2026-10', `projects/${p}/budget`, `projects/${p}/contract`, `projects/${p}/updates`]) await expect(SE, 'GET', u, null, 403, 'no money');
     await expect(SE, 'PUT', 'boq_items/' + bq, { done_pct: 40, rate: 1 }, 200);

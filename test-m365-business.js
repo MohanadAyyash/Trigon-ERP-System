@@ -311,7 +311,7 @@ ctx.pdf = async html => Buffer.from(`%PDF-1.4\n% fake ${crypto.createHash('sha25
         assert.ok(!(await doc(`${rq}?party=${cl}`)).t.includes('>Client<'), 'a client is never the addressee');
         assert.equal((await fetch(`${base}/api/doc/rfqs/${rq}/pdf`, { headers: { cookie: admin } })).status, 200, 'PDF');
         const rq2 = ok(await call('POST', 'rfqs', { project_id: P2, description: 'Tower RFQ', items: [{ description: 'Cement', unit: 'bag', qty: 100 }] }, admin)).id;
-        assert.equal((await doc(rq2, ck.site)).s, 404, 'a site engineer of P1 cannot print a P2 RFQ'); assert.equal((await doc(rq, ck.site)).s, 200, '…but can print their own project\'s');
+        assert.equal((await doc(rq2, ck.site)).s, 403, 'a site engineer of P1 cannot print a P2 RFQ'); assert.equal((await doc(rq, ck.site)).s, 200, '…but can print their own project\'s');
         // phase 2: one separate e-mail per supplier, to the address on the supplier card only, each with its own PDF
         const n0 = mock.mails.length, rfqBefore = q('SELECT items, description FROM rfqs WHERE id=?', rq)[0];
         const sr = ok(await call('POST', `m365/rfq-send/${rq}`, { party_ids: [sup, supB, supC, supD, cl, clM, 999999], message: 'Urgent: <b>please</b> quote' }, ck.proc));

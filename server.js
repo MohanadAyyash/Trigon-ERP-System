@@ -358,8 +358,21 @@ function scopeFilter(sc, body) {
   if (body && typeof body === 'object' && sc.list !== 'projects') { const o = { ...body }; for (const k of Object.keys(o)) if (Array.isArray(o[k])) o[k] = o[k].filter(x => keep(x) && (k !== 'roster' || sc.emps.has(x.id))); return o; }
   return body;
 }
+// printed documents (/api/doc/<kind>/<id>[/pdf]): the project each kind belongs to. A project-limited user may print only kinds listed
+// here, and only for their own projects; any other kind (statements, payslips, letters…) is refused to them (fail closed).
+const DOC_PROJECT = {
+  invoices: 'SELECT project_id FROM invoices WHERE id=?', quotes: 'SELECT project_id FROM quotes WHERE id=?', purchase_orders: 'SELECT project_id FROM purchase_orders WHERE id=?',
+  rfqs: 'SELECT project_id FROM rfqs WHERE id=?', pay_app: 'SELECT project_id FROM pay_apps WHERE id=?', sc_agreement: 'SELECT project_id FROM subcontracts WHERE id=?',
+  sub_certs: 'SELECT s.project_id FROM sub_certs c JOIN subcontracts s ON s.id=c.subcontract_id WHERE c.id=?', ipc: 'SELECT project_id FROM ipcs WHERE invoice_id=?',
+};
 async function scopeCheck(sc, req, method, url, a, b) {
   const p = x => x == null || x === '' || sc.projects.has(+x), e = x => x == null || x === '' || sc.emps.has(+x);
+  if (a === 'export') return false;                         // exports are company-wide lists (all projects, money): none for a project-limited user
+  if (a === 'doc') {
+    const id = url.pathname.split('/')[4], sql = DOC_PROJECT[b];
+    if (!sql || !/^\d+$/.test(id || '')) return false;
+    const row = db.prepare(sql).get(+id); if (row && !p(row.project_id)) return false;   // a missing record stays "not found"
+  }
   if (a === 'projects' && b && !sc.projects.has(+b)) return false;
   if (!p(url.searchParams.get('project_id'))) return false;
   if (url.searchParams.get('entity') === 'project' && !p(url.searchParams.get('entity_id'))) return false;
