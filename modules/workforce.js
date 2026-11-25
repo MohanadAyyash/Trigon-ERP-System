@@ -74,10 +74,13 @@ module.exports = ctx => {
     if (!steps(kind, refId).length) db.prepare("INSERT INTO approval_steps(kind,ref_id,level,approver,status) VALUES(?,?,1,'role:hr','pending')").run(kind, refId);   // records from before approvals existed
     const step = db.prepare("SELECT * FROM approval_steps WHERE kind=? AND ref_id=? AND status='pending' ORDER BY level LIMIT 1").get(kind, refId);
     if (!canDecide(step, me)) { const e = new Error('This request is waiting for another approver'); e.status = 403; throw e; }
+    const own = !!me.employee_id && +r.employee_id === +me.employee_id;
+    if (own && !ctx.selfApprover(me)) { const e = new Error('Nobody can approve a request of their own'); e.status = 403; throw e; }   // except the one person named on the server
     const last = !db.prepare("SELECT 1 FROM approval_steps WHERE kind=? AND ref_id=? AND status='waiting'").get(kind, refId);
     if (b.status === 'approved' && last) ctx.hrFinalize(TBL[kind], refId, 'approved', me, b.note, b.force, true);   // checks the leave balance before anything is written
     db.prepare('UPDATE approval_steps SET status=?, decided_by=?, decided_at=?, note=? WHERE id=?').run(b.status, me.username, nowLocal(), b.note || '', step.id);
     audit(req, b.status, TBL[kind], refId, `level ${step.level}`);
+    if (own) audit(req, 'self-approve', TBL[kind], refId, `${b.status} own ${kind} request, level ${step.level} (SELF_APPROVER_USERNAME)`);
     if (b.status === 'rejected') {
       db.prepare("UPDATE approval_steps SET status='skipped' WHERE kind=? AND ref_id=? AND status='waiting'").run(kind, refId);
       return ctx.hrFinalize(TBL[kind], refId, 'rejected', me, b.note);
@@ -95,6 +98,7 @@ module.exports = ctx => {
     for (const s of db.prepare("SELECT * FROM approval_steps WHERE status='pending' ORDER BY id").all()) {
       if (!canDecide(s, me)) continue;
       const r = db.prepare(`SELECT * FROM ${TBL[s.kind]} WHERE id=?`).get(s.ref_id); if (!r || r.status !== 'pending') continue;
+      if (me.employee_id && +r.employee_id === +me.employee_id && !ctx.selfApprover(me)) continue;   // own requests: only for the person named on the server
       const e = emp(r.employee_id), all = steps(s.kind, s.ref_id);
       out.push({ step_id: s.id, kind: s.kind, ref_id: s.ref_id, level: s.level, levels: all.length, employee: e && e.name, employee_id: r.employee_id, record: r,
         history: all.filter(x => x.status === 'approved').map(x => ({ level: x.level, by: x.decided_by, at: x.decided_at, note: x.note })),

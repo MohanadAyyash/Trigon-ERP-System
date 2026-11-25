@@ -42,7 +42,7 @@ module.exports = ctx => {
   // dayTotal: everything of this employee of the same day (claims of the same date, requests made the same day) — the accountant's
   // limit applies to that total, so an amount cannot be split to stay under it
   function approvalBlock(me, amount, employeeId, requestedById, dayTotal) {
-    if (me.employee_id && +me.employee_id === +employeeId) return 'Nobody can approve a request of their own';
+    if (me.employee_id && +me.employee_id === +employeeId && !ctx.selfApprover(me)) return 'Nobody can approve a request of their own';   // except the one person named on the server
     if (me.role === 'admin') return null;
     if (!['manager', 'accountant'].includes(me.role)) return 'Your role cannot approve';
     if (!me.employee_id) return 'Link your account to your employee record (Settings → Users → Employee) before approving — so a request of your own can never be approved by you';
@@ -123,6 +123,7 @@ module.exports = ctx => {
       db.prepare("UPDATE expense_claims SET status='approved', decided_by=?, decided_by_id=?, decided_at=?, decision_note=?, bill_id=?, payment_id=? WHERE id=?").run(me.username, me.id, now(), String(x.note || '').trim(), billId, Number(pay.lastInsertRowid), c.id);
     }
     audit(req, x.status, 'expense_claims', c.id, `${total(c)}`);
+    if (me.employee_id && +me.employee_id === +c.employee_id) audit(req, 'self-approve', 'expense_claims', c.id, `${x.status} own claim ${total(c)} (SELF_APPROVER_USERNAME)`);
     const owner = db.prepare('SELECT id FROM users WHERE employee_id=?').all(c.employee_id).map(u => u.id);
     ping(owner, x.status === 'approved' ? 'تمت الموافقة على مطالبتك / Your expense claim was approved' : 'رُفضت مطالبتك / Your expense claim was rejected', `${c.description} — ${money(total(c))} AED${x.note ? ' — ' + x.note : ''}`, '#myaccount');
   }

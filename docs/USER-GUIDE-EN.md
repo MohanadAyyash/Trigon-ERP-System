@@ -1379,6 +1379,12 @@ Menu: **Approvals**. Shows the leave and requests that reached your level of the
 1. Review the request (and the employee's leave balance).
 2. **Approve** or **Reject** (with a note). After you approve it moves to the next level; the employee is told the final decision.
 
+**Nobody approves a request of their own**, of any kind, administrators included: expense claims, petty cash requests, leave, employee requests (e.g. an advance) and spend approvals. Your requests are approved by someone else.
+- **The only exception:** one person named in the server settings (`SELF_APPROVER_USERNAME` in the `.env` file), usually the owner. Only that person approves their own requests.
+- The name cannot be set from inside the app, so no other administrator can add themselves.
+- The exception gives no extra right: the role still needs the right to approve.
+- Every approval of one's own request is in the audit log as `self-approve`.
+
 <!--img-->
 
 **📷 Approvals page**
@@ -2113,7 +2119,7 @@ An **expense claim** = an employee paid a company expense from own money (fuel, 
 - A receipt can be attached later, and the claim withdrawn, while it is pending.
 
 **Approval:** menu **Expense claims**.
-- The **manager and the administrator** approve any amount. The **accountant** approves up to a limit the administrator sets (button **Accountant's limit**; 0 = cannot approve). **Nobody approves their own claim.**
+- The **manager and the administrator** approve any amount. The **accountant** approves up to a limit the administrator sets (button **Accountant's limit**; 0 = cannot approve). **Nobody approves their own claim**, except the person named in the server settings (section 22).
 - Approvers are notified when a claim comes in, and the employee when it is approved or rejected. A rejection needs a reason.
 - **The manager and the accountant** cannot approve until their account is linked to their own employee record (Settings → Users → Employee), so nobody can approve their own claim.
 - The accountant's limit counts **all of the employee's claims of the same day**, so a large amount cannot be split into small claims.
