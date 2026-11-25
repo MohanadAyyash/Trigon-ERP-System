@@ -291,7 +291,77 @@ ctx.pdf = async html => Buffer.from(`%PDF-1.4\n% fake ${crypto.createHash('sha25
       assert.equal(q("SELECT status FROM m365_mail_log WHERE recipients='c@example.test'")[0].status, 'failed'); assert.ok(audits().some(a => a.action === 'outlook-send-failed'));
       // RFQ and quotation; Outlook switched off
       const rfq = ok(await call('POST', 'rfqs', { project_id: P1, description: 'Steel', items: [{ description: 'Rebar', unit: 't', qty: 5 }] }, admin)).id;
-      ok(await call('POST', `m365/mail/rfqs/${rfq}`, { to: 'supplier@example.test' }, ck.proc)); assert.equal(mock.mails.at(-1).body.message.attachments.length, 0, 'RFQ: no printed form, text only');
+      ok(await call('POST', `m365/mail/rfqs/${rfq}`, { to: 'supplier@example.test' }, ck.proc)); assert.equal(mock.mails.at(-1).body.message.attachments[0].name, `${q('SELECT number FROM rfqs WHERE id=?', rfq)[0].number}.pdf`, 'RFQ: now sent with its PDF');
+      // ================= RFQ: printable request (no prices) and one e-mail per supplier =================
+      {
+        const supB = ok(await call('POST', 'parties', { type: 'supplier', name: 'Bravo Steel', email: 'bravo@example.test; sales@bravo.example.test' }, admin)).id;
+        const supC = ok(await call('POST', 'parties', { type: 'supplier', name: 'Charlie Trading (no e-mail)' }, admin)).id;
+        const supD = ok(await call('POST', 'parties', { type: 'supplier', name: 'Delta Bad Mail', email: 'not-an-address' }, admin)).id;
+        const clM = ok(await call('POST', 'parties', { type: 'client', name: 'Client With Mail', email: 'client-mail@example.test' }, admin)).id;
+        const rq = ok(await call('POST', 'rfqs', { project_id: P1, description: 'Rebar for slab', due_date: '2026-12-05', deliver_to: 'Site gate 2', terms: 'Mill certificates required',
+          items: [{ description: 'Rebar 12 mm', unit: 't', qty: 7 }, { description: 'Binding wire', unit: 'roll', qty: 40 }],
+          quotes: [{ party_id: sup, rates: [987.65, 43.21], delivery_days: 9 }] }, admin)).id;
+        const RN = q('SELECT number FROM rfqs WHERE id=?', rq)[0].number;
+        const doc = async (u, c0 = admin) => { const r = await fetch(`${base}/api/doc/rfqs/${u}`, { headers: { cookie: c0, 'X-Forwarded-For': xff() } }); return { s: r.status, t: await r.text() }; };
+        // phase 1: the printed request: items, quantities, due date, delivery place, terms; never a price or another supplier
+        const pr = await doc(rq); assert.equal(pr.s, 200, pr.t.slice(0, 200));
+        for (const x of [RN, 'REQUEST FOR QUOTATION', 'Rebar 12 mm', 'Binding wire', '2026-12-05', 'Site gate 2', 'Mill certificates required', '40.00']) assert.ok(pr.t.includes(x), 'printed: ' + x);
+        for (const x of ['987.65', '987,65', '43.21', 'Evil', 'Bravo']) assert.ok(!pr.t.includes(x), 'no price / supplier name on the generic request: ' + x);
+        const prB = await doc(`${rq}?party=${supB}`); assert.ok(prB.t.includes('Bravo Steel') && !prB.t.includes('987.65') && !prB.t.includes('Evil'), 'addressed to one supplier, still no prices');
+        assert.ok(!(await doc(`${rq}?party=${cl}`)).t.includes('>Client<'), 'a client is never the addressee');
+        assert.equal((await fetch(`${base}/api/doc/rfqs/${rq}/pdf`, { headers: { cookie: admin } })).status, 200, 'PDF');
+        const rq2 = ok(await call('POST', 'rfqs', { project_id: P2, description: 'Tower RFQ', items: [{ description: 'Cement', unit: 'bag', qty: 100 }] }, admin)).id;
+        assert.equal((await doc(rq2, ck.site)).s, 404, 'a site engineer of P1 cannot print a P2 RFQ'); assert.equal((await doc(rq, ck.site)).s, 200, '…but can print their own project\'s');
+        // phase 2: one separate e-mail per supplier, to the address on the supplier card only, each with its own PDF
+        const n0 = mock.mails.length, rfqBefore = q('SELECT items, description FROM rfqs WHERE id=?', rq)[0];
+        const sr = ok(await call('POST', `m365/rfq-send/${rq}`, { party_ids: [sup, supB, supC, supD, cl, clM, 999999], message: 'Urgent: <b>please</b> quote' }, ck.proc));
+        const by = id => sr.results.find(x => x.party_id === id);
+        assert.equal(sr.sent, 2); assert.equal(by(sup).status, 'sent'); assert.equal(by(supB).status, 'sent');
+        assert.deepEqual([by(supC).status, by(supD).status, by(cl).status, by(clM).status, by(999999).status], ['skipped', 'skipped', 'skipped', 'skipped', 'skipped']); assert.match(by(clM).error, /Not a supplier/); assert.match(by(supC).error, /No valid e-mail/);
+        const sentMails = mock.mails.slice(n0); assert.equal(sentMails.length, 2, 'exactly one e-mail per supplier with an address');
+        const toOf = mm => mm.body.message.toRecipients.map(x => x.emailAddress.address).sort();
+        assert.deepEqual(sentMails.map(toOf), [['supplier@example.test'], ['bravo@example.test', 'sales@bravo.example.test']], 'each supplier only sees its own address');
+        for (const mm of sentMails) {
+          assert.equal(mm.owner, OID.proc, 'from the sender\'s own mailbox'); assert.ok(!mm.body.message.ccRecipients && !mm.body.message.bccRecipients && !mm.body.message.from, 'no cc / bcc / from');
+          assert.equal(mm.body.message.attachments.length, 1); assert.equal(mm.body.message.attachments[0].name, `${RN}.pdf`); assert.match(mm.body.message.subject, new RegExp(RN));
+          assert.ok(!mm.body.message.body.content.includes('<b>please</b>') && mm.body.message.body.content.includes('&lt;b&gt;please'), 'the message is escaped');
+          assert.ok(!mm.body.message.body.content.includes('987.65'), 'no prices in the e-mail');
+        }
+        const pdfFor = async id => (await ctx.pdf(ctx.renderPage('rfqs', rq, { role: 'admin', username: 'x', id: 0 }, false, new URLSearchParams({ party: String(id) })).html)).toString('base64');
+        assert.equal(sentMails[1].body.message.attachments[0].contentBytes, await pdfFor(supB), 'the PDF addressed to that supplier'); assert.notEqual(sentMails[0].body.message.attachments[0].contentBytes, await pdfFor(supB));
+        // logged per supplier; the RFQ is marked sent and the invited suppliers join its comparison; nothing else of the RFQ changes
+        const lg = q("SELECT party_id, status, recipients, sent_by FROM m365_mail_log WHERE entity='rfqs' AND entity_id=? ORDER BY id", rq);
+        assert.deepEqual(lg.map(x => [x.party_id, x.status, x.sent_by]), [[sup, 'sent', 'proc'], [supB, 'sent', 'proc']]);
+        const after = q('SELECT * FROM rfqs WHERE id=?', rq)[0]; assert.ok(after.sent_at); assert.equal(after.items, rfqBefore.items); assert.equal(after.description, rfqBefore.description);
+        const qs = JSON.parse(after.quotes); assert.deepEqual(qs.map(x => x.party_id), [sup, supB], 'Bravo added to the comparison'); assert.deepEqual(qs[0].rates, [987.65, 43.21], 'prices already entered kept');
+        assert.equal(audits().filter(x => x.action === 'outlook-send' && x.detail.startsWith(`rfqs ${RN}`)).length, 2);
+        const gl = ok(await call('GET', `m365/mail/rfqs/${rq}`, undefined, ck.proc)); assert.ok(gl.some(x => x.party_id === supB && x.status === 'sent'), 'send status per supplier');
+        // a repeat within 7 days needs a confirmation (per supplier)
+        const n1 = mock.mails.length, again = ok(await call('POST', `m365/rfq-send/${rq}`, { party_ids: [supB] }, ck.proc));
+        assert.equal(again.results[0].status, 'already_sent'); assert.equal(mock.mails.length, n1);
+        ok(await call('POST', `m365/rfq-send/${rq}`, { party_ids: [supB], confirm_resend: true }, ck.proc)); assert.equal(mock.mails.length, n1 + 1);
+        // rights and state: viewer / site engineer of another project / no Mail.Send / injected sender / bad lists / Outlook off / awarded
+        assert.equal((await call('POST', `m365/rfq-send/${rq}`, { party_ids: [supB] }, ck.viewer)).s, 403, 'viewer cannot send');
+        assert.equal((await call('POST', `m365/rfq-send/${rq2}`, { party_ids: [supB] }, ck.site)).s, 404, 'site engineer: not another project\'s RFQ');
+        { const r = await call('POST', `m365/rfq-send/${rq}`, { party_ids: [supB] }, ck.acc); assert.equal(r.s, 409); assert.equal(r.j.code, 'consent_required', 'a link without Mail.Send cannot send'); }
+        { const r = await call('POST', `m365/rfq-send/${rq}`, { party_ids: [supB], from: 'boss@example.test' }, admin); assert.equal(r.s, 400); assert.match(r.j.error, /own Microsoft account/); }
+        for (const bad of [[], 'x', [0], [1.5], Array.from({ length: 21 }, (_, i) => i + 1)]) assert.equal((await call('POST', `m365/rfq-send/${rq}`, { party_ids: bad }, admin)).s, 400, 'bad list ' + JSON.stringify(bad).slice(0, 20));
+        { const r = await call('POST', `m365/rfq-send/${rq}`, { party_ids: [supB], to: 'attacker@example.test', confirm_resend: true }, admin); assert.equal(r.s, 200); assert.deepEqual(toOf(mock.mails.at(-1)), ['bravo@example.test', 'sales@bravo.example.test'], 'a "to" in the request is ignored'); }
+        process.env.M365_OUTLOOK_ENABLED = '0'; assert.equal((await call('POST', `m365/rfq-send/${rq}`, { party_ids: [supB] }, admin)).s, 503); process.env.M365_OUTLOOK_ENABLED = '1';
+        // Outlook failing: each supplier reported failed, nothing marked as sent
+        const rq3 = ok(await call('POST', 'rfqs', { project_id: P1, description: 'Fail test', items: [{ description: 'Sand', unit: 'm3', qty: 3 }] }, admin)).id;
+        mock.mailFail = true; const fr = ok(await call('POST', `m365/rfq-send/${rq3}`, { party_ids: [sup, supB] }, ck.proc)); mock.mailFail = false;
+        assert.equal(fr.sent, 0); assert.ok(fr.results.every(x => x.status === 'failed')); assert.equal(q('SELECT sent_at, quotes FROM rfqs WHERE id=?', rq3)[0].sent_at, null); assert.equal(q('SELECT quotes FROM rfqs WHERE id=?', rq3)[0].quotes, '[]');
+        // PDF engine down: failed per supplier, nothing sent
+        const realPdf2 = ctx.pdf; ctx.pdf = async () => { throw new Error('no browser'); }; const pr3 = ok(await call('POST', `m365/rfq-send/${rq3}`, { party_ids: [supB] }, ck.proc)); ctx.pdf = realPdf2;
+        assert.equal(pr3.results[0].status, 'failed'); assert.match(pr3.results[0].error, /PDF/);
+        // SharePoint: an RFQ is stored once sent (in the project's RFQs folder)
+        const sp0 = ok(await call('GET', `m365/documents/rfqs/${rq3}`, undefined, admin)); assert.equal(sp0.ready, false); assert.match(sp0.why_not, /once it is sent/);
+        ok(await upload('rfqs', rq, admin)); assert.deepEqual(mock.puts.at(-1).filePath, ['Trigon Civil Projects', 'P-101 - Villa', 'RFQs', `${RN}.pdf`]);
+        // once awarded it is not sent again
+        ok(await call('POST', `rfqs/${rq}/award`, { party_id: sup }, admin)); { const r = await call('POST', `m365/rfq-send/${rq}`, { party_ids: [supB], confirm_resend: true }, admin); assert.equal(r.s, 409); assert.match(r.j.error, /closed/); }
+        console.log('✔ RFQ: printed request with items, quantities, due date, delivery place and terms, never a price or another supplier; site scope on printing; one e-mail per supplier to the address on its card with its own PDF, no cc / bcc; skipped without an address; logged per supplier; repeat needs confirmation; invited suppliers join the comparison, prices kept; rights, Outlook link, injected sender / recipients refused; failures reported per supplier; SharePoint copy once sent; not after award');
+      }
       ok(await call('POST', `m365/mail/quotes/${quote}`, { to: 'client@example.test' }, admin));
       process.env.M365_OUTLOOK_ENABLED = '0'; { const r = await call('POST', `m365/mail/purchase_orders/${poSent}`, { to: 'z@example.test' }, ck.proc); assert.equal(r.s, 503); } process.env.M365_OUTLOOK_ENABLED = '1';
       const mlog = ok(await call('GET', `m365/mail/purchase_orders/${poSent}`, undefined, ck.proc)); assert.ok(mlog.length >= 3 && mlog.every(x => !('error' in x) || x.error === null || typeof x.error === 'string'));

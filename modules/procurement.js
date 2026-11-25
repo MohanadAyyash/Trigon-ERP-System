@@ -14,9 +14,11 @@ module.exports = ctx => {
   // subcontract terms printed on the payment certificate; VAT basis: 'gross' (on the work value) or 'net' (after retention and contra charges)
   [['agreement_no', 'TEXT'], ['agreement_date', 'TEXT'], ['start_date', 'TEXT'], ['completion_date', 'TEXT'], ['eot_date', 'TEXT'], ['variations', 'REAL DEFAULT 0'], ['vat_basis', "TEXT DEFAULT 'gross'"], ['contra_uplift', 'REAL DEFAULT 0']].forEach(([c, d]) => addCol('subcontracts', c, d));
   [['deliver_to', 'TEXT'], ['site_contact', 'TEXT'], ['payment_terms', 'TEXT'], ['valid_from', 'TEXT'], ['valid_to', 'TEXT'], ['pr_ref', 'TEXT'], ['quote_ref', 'TEXT']].forEach(([c, d]) => addCol('purchase_orders', c, d));
+  // RFQ sent to suppliers: quotation due date, delivery place, terms; sent_at = first sent from the system (set by the Outlook sending only)
+  [['due_date', 'TEXT'], ['deliver_to', 'TEXT'], ['terms', 'TEXT'], ['sent_at', 'TEXT']].forEach(([c, d]) => addCol('rfqs', c, d));
   [['period_to', 'TEXT'], ['materials', 'REAL DEFAULT 0'], ['release', 'REAL DEFAULT 0'], ['app_ref', 'TEXT'], ['cost_codes', 'TEXT'], ['vat_basis', 'TEXT']].forEach(([c, d]) => addCol('sub_certs', c, d));   // vat_basis: fixed when the certificate is created
   Object.assign(TABLES, {
-    rfqs: { cols: ['number', 'date', 'project_id', 'description', 'items', 'quotes', 'status', 'awarded_party_id'], json: ['items', 'quotes'], prefix: 'RFQ' },
+    rfqs: { cols: ['number', 'date', 'project_id', 'description', 'items', 'quotes', 'status', 'awarded_party_id', 'due_date', 'deliver_to', 'terms'], json: ['items', 'quotes'], prefix: 'RFQ' },
     purchase_orders: { cols: ['number', 'date', 'party_id', 'project_id', 'rfq_id', 'delivery_date', 'status', 'items', 'vat_pct', 'terms', 'notes', 'deliver_to', 'site_contact', 'payment_terms', 'valid_from', 'valid_to', 'pr_ref', 'quote_ref'], num: ['vat_pct'], json: ['items'], prefix: 'PO' },
     subcontracts: { cols: ['project_id', 'party_id', 'description', 'contract_value', 'retention_pct', 'advance', 'status', 'agreement_no', 'agreement_date', 'start_date', 'completion_date', 'eot_date', 'variations', 'vat_basis', 'contra_uplift'], num: ['contract_value', 'retention_pct', 'advance', 'variations', 'contra_uplift'] },
   });
@@ -124,6 +126,35 @@ const PO_CONDITIONS = `1. Order. This purchase order, its attachments and these 
       ${r.terms ? `<p style="font-size:8.5pt;margin:3mm 0 0"><b>Special conditions:</b><br>${esc(r.terms).replace(/\n/g, '<br>')}</p>` : ''}${r.notes ? `<p style="font-size:8.5pt;margin:2mm 0 0"><b>Notes:</b><br>${esc(r.notes).replace(/\n/g, '<br>')}</p>` : ''}
       <ul class="pon">${notes.map(x => `<li>${esc(x)}</li>`).join('')}</ul>`,
       after: `${cond ? `<div class="cond"><h3>GENERAL CONDITIONS OF PURCHASE</h3>${esc(cond).replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>').replace(/^/, '<p>')}</p></div>` : ''}` };
+  };
+
+  // The request for quotation sent to suppliers: the items and quantities only. It never shows a price: the suppliers' rates entered
+  // for the comparison (rfqs.quotes) are not read here. ?party=<supplier id> addresses it to one supplier (the copy e-mailed to them).
+  ctx.renderers.rfqs = (id, me, q) => {
+    const r = db.prepare('SELECT * FROM rfqs WHERE id=?').get(id); if (!r) notFound();
+    const sc = me && ctx.siteScope ? ctx.siteScope(me) : null; if (sc && r.project_id && !sc.projects.has(+r.project_id)) notFound();   // a site user: own projects only
+    const S = getSettings(), items = json(r.items).filter(i => i && i.description), p = db.prepare('SELECT * FROM projects WHERE id=?').get(r.project_id) || {};
+    const pid = q && typeof q.get === 'function' ? +q.get('party') || 0 : 0, sup = pid ? db.prepare("SELECT * FROM parties WHERE id=? AND COALESCE(type,'')!='client'").get(pid) : null;
+    const row = (k, v) => v ? `<tr><td>${k}</td><td>${v}</td></tr>` : '', blank = '<span class="fill"></span>', cur = S.currency || 'AED';
+    const lines = items.map((i, n) => `<tr><td>${n + 1}</td><td>${esc(i.description || '').replace(/\n/g, '<br>')}</td><td>${esc(i.unit || '')}</td><td class="n">${money(i.qty)}</td><td></td><td></td></tr>`).join('');
+    const reply = S.email ? ` to <b>${esc(S.email)}</b>` : '';
+    return { title: `Request for Quotation ${r.number}`, filename: r.number, ref: r.number, date: r.date, stamp: false, label: 'For the purchaser', receiver: 'Supplier signature and stamp',
+      body: `<style>.rfq{width:100%;table-layout:fixed;font-size:8.5pt}.rfq td{padding:1.6mm 1mm;word-wrap:break-word;height:6mm}.rfq th{font-size:7pt}.fill{display:inline-block;min-width:45mm;border-bottom:.5pt solid #8A8578}
+        .rfs td{border:0;padding:1.2mm 0}.rfs td:first-child{color:#8A8578;width:42%}.rfn{font-size:8pt;margin:3mm 0 0;padding-inline-start:4mm}.rfn li{margin:.6mm 0}</style>
+      <h2 class="t">REQUEST FOR QUOTATION</h2>
+      <div class="info"><div><h4>To</h4>${sup ? `<div class="nm">${esc(sup.name || '')}</div>${sup.address ? `<div class="muted">${esc(sup.address)}</div>` : ''}<table style="margin-top:1mm"><tbody>${row('Email', esc(sup.email || ''))}${row('TRN', esc(sup.trn || ''))}</tbody></table>` : `<div class="nm">Supplier: ${blank}</div>`}</div>
+        <div><h4>Request details</h4><table><tbody>${row('RFQ no.', `<b class="mono">${esc(r.number)}</b>`)}${row('Date', esc(r.date || ''))}${row('From', esc(S.legal_name || S.company_name || ''))}
+          ${row('Project', esc(`${p.code ? p.code + ' — ' : ''}${p.name || ''}`))}${row('Quotation due by', `<b>${esc(r.due_date || '')}</b>`)}${row('Deliver to', esc(r.deliver_to || ''))}</tbody></table></div></div>
+      ${r.description ? `<p style="font-size:9pt;margin:0 0 2mm"><b>Subject:</b> ${esc(r.description)}</p>` : ''}
+      <p style="font-size:8.5pt;margin:0 0 2mm">Please quote your best prices for the items below${r.due_date ? ` by <b>${esc(r.due_date)}</b>` : ''}${reply}, quoting our reference <b>${esc(r.number)}</b>.</p>
+      <table class="rfq"><colgroup>${[5, 47, 9, 11, 13, 15].map(w => `<col style="width:${w}%">`).join('')}</colgroup>
+        <thead><tr><th>SR</th><th>Description</th><th>Unit</th><th class="n">Qty</th><th class="n">Unit price<br>${esc(cur)} excl. VAT</th><th class="n">Amount<br>${esc(cur)} excl. VAT</th></tr></thead><tbody>${lines}</tbody>
+        <tfoot><tr><td colspan="5" class="n">Total excluding VAT</td><td></td></tr><tr><td colspan="5" class="n">VAT</td><td></td></tr><tr><td colspan="5" class="n"><b>Total including VAT</b></td><td></td></tr></tfoot></table>
+      <table class="rfs" style="margin-top:3mm;font-size:8.5pt"><tbody><tr><td>Delivery period (days from order)</td><td>${blank}</td></tr><tr><td>Quotation valid until</td><td>${blank}</td></tr>
+        <tr><td>Payment terms</td><td>${blank}</td></tr><tr><td>Supplier TRN</td><td>${sup && sup.trn ? esc(sup.trn) : blank}</td></tr></tbody></table>
+      ${r.terms ? `<p style="font-size:8.5pt;margin:3mm 0 0"><b>Terms and requirements:</b><br>${esc(r.terms).replace(/\n/g, '<br>')}</p>` : ''}
+      <ul class="rfn"><li>Prices in ${esc(cur)}, excluding VAT, with VAT shown separately on your quotation.</li><li>Quote for the full quantities; state any item you cannot supply or offer as an alternative.</li>
+        <li>This request is not an order. An order is valid only on our signed purchase order.</li></ul>` };
   };
 
   ctx.renderers.sub_certs = id => {
