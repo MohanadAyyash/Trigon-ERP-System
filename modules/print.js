@@ -8,6 +8,13 @@ module.exports = ctx => {
   ctx.renderers = ctx.renderers || {};                       // kind -> (id, me) => { title, body, filename, ...signOpts }
   ctx.pdf = htmlToPdf;
 
+  // payment terms on the quotation cover: one stage per line, every line kept, in order. "25% - Upon signing", "50%: …", "50% advance
+  // payment", "٣٠٪ عند …", "AED 5,000 on mobilisation" → [figure, text]; any other line → its text alone.
+  const payStages = t => String(t || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean).map(l => {
+    let m = /^([^\s:|–—-]+)\s*[:|–—-]\s*(.+)$/.exec(l); if (m) return [m[1], m[2].trim()];
+    m = /^((?:[A-Za-z]{3}\s*)?[\d٠-٩][\d٠-٩.,]*\s*[%٪]?)\s+(.+)$/.exec(l); if (m) return [m[1].trim(), m[2].trim()];
+    return ['', l];
+  });
   const docRenderer = kind => (id, me, q) => {
     const e = enrich(), doc = (kind === 'invoices' ? e.invoices : e.quotes).find(x => x.id === id);
     if (!doc) { const err = new Error('not found'); err.status = 404; throw err; }
@@ -20,7 +27,7 @@ module.exports = ctx => {
       const cur = S.currency || 'AED', u = me && me.id ? ctx.db.prepare('SELECT username,display_name,job_title,mobile FROM users WHERE id=?').get(me.id) : null;   // signed by the person who issues it (profile)
       out.cover = cover(S, ctx.brand, { ref: doc.number, date: doc.date, to: doc.client_name, subtitle: doc.project_name, title_ar: S.print_arabic === '1' ? 'عرض سعر' : '',
         attention: doc.attention, rows: [['Project', doc.project_name], ['Location', doc.location], ['Plot No.', doc.plot_no], ['NOC Reference', doc.noc_ref], ['Scope of Work', doc.scope || (doc.items[0] || {}).description], ['Contract Basis', doc.contract_basis], ['Validity', `${doc.validity_days} days from date of issue`]],
-        payment: String(doc.payment_terms || '').split(/\r?\n/).map(l => /^\s*([^\s:|–—-]+)\s*[:|–—-]\s*(.+)$/.exec(l)).filter(Boolean).map(m => [m[1], m[2].trim()]).slice(0, 6),   // one stage per line: "25% - Upon signing of the agreement"
+        payment: payStages(doc.payment_terms),
         totals: doc.vat_pct > 0 ? [[`TOTAL AMOUNT (Excl. VAT ${doc.vat_pct}%)`, `${cur} ${money(doc.subtotal)}`], [`TOTAL INCLUSIVE OF VAT ${doc.vat_pct}%`, `${cur} ${money(doc.total)}`]] : [['TOTAL AMOUNT', `${cur} ${money(doc.total)}`]],
         intro: 'We are pleased to submit our quotation for the above-mentioned works. The detailed Bill of Quantities is attached herewith. We trust our offer meets your requirements and remain at your disposal for any clarification.',
         signer: u ? { name: u.display_name || u.username, title: u.job_title, contact: [u.mobile, S.email].filter(Boolean).join(' · ') } : {} });

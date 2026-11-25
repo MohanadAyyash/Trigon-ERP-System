@@ -81,6 +81,14 @@ server.listen(0, async () => {
       /GRAND TOTAL \(Excl\. VAT 5%\)<\/td><td class="n">4,500\.00<\/td>/, /VAT 5% \(added at invoice stage\)<\/td><td class="n">225\.00<\/td>/, /TOTAL INCLUSIVE OF VAT 5%<\/td><td class="n">4,725\.00<\/td>/,
       /PROVISIONAL ITEMS — Payable only if executed \/ instructed \(NOT included in Grand Total\)/, /<td>P1<\/td><td>Road markings<\/td>/, /TOTAL PROVISIONAL \(if all executed\)<\/td><td class="n">700\.00<\/td>/,
       /<h4>NOTES<\/h4><ol><li>All items are all-inclusive\.<\/li><li>Quantities are approximate\.<\/li><li>Prices exclude VAT\.<\/li><\/ol>/]) assert.match(bh, re);
+    // payment terms written as free text, in Arabic, with an amount, or with more stages than fit: every line reaches the cover (never dropped silently)
+    const pt = ok(await call('POST', 'quotes', { client_id: cl, project_name: 'Terms test', vat_pct: 5, items: [{ description: 'Works', qty: 1, rate: 1000 }],
+      payment_terms: '50% advance payment\n٣٠٪ عند إنجاز الهيكل\nAED 5,000 on mobilisation\n10%: Upon handover\nBalance within 30 days of the final invoice\n\n  5% - retention after 1 year  ' })).id;
+    const ph = await fetch(`${base}doc/quotes/${pt}`, { headers: { cookie } }).then(r => r.text());
+    assert.match(ph, /class="cv-pay"><div><b>50%<\/b><span>advance payment<\/span><\/div><div><b>٣٠٪<\/b><span>عند إنجاز الهيكل<\/span><\/div><div><b>AED 5,000<\/b><span>on mobilisation<\/span><\/div><div><b>10%<\/b><span>Upon handover<\/span><\/div><div><span>Balance within 30 days of the final invoice<\/span><\/div><div><b>5%<\/b><span>retention after 1 year<\/span><\/div><\/div>/, 'every payment line on the cover, in order');
+    const pt2 = ok(await call('POST', 'quotes', { client_id: cl, project_name: 'Terms test 2', items: [{ description: 'Works', qty: 1, rate: 1000 }], payment_terms: [1, 2, 3, 4, 5, 6, 7, 8].map(n => `${n}0% - stage ${n}`).join('\n') })).id;
+    const ph2 = await fetch(`${base}doc/quotes/${pt2}`, { headers: { cookie } }).then(r => r.text());
+    assert.equal((ph2.match(/<div class="cv-pay">[\s\S]*?<\/div><\/div>/)[0].match(/<b>/g) || []).length, 8, 'more than six stages: none dropped'); assert.match(ph2, /stage 8/);
     const plain = await fetch(`${base}doc/quotes/${qid}?cover=0`, { headers: { cookie } }).then(r => r.text());              // no sections: plain numbering, no sub-totals
     assert.match(plain, /<tr><td>1<\/td><td>Asphalt<\/td>/); assert.ok(!/SUB-TOTAL/.test(plain) && !/PROVISIONAL ITEMS/.test(plain)); assert.match(plain, /GRAND TOTAL/);
     const bp = ok(await call('POST', `quotes/${bq}/convert`)).project_id, bproj = ok(await call('GET', 'projects/' + bp));
