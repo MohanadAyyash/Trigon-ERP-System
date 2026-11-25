@@ -255,3 +255,5 @@ tr.click:focus-visible{outline-offset:-2px}
 }
 @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 .tc-svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;vertical-align:middle}.tc-launcher .tc-svg{width:26px;height:26px}
+/* receipt scanner (scan.js): page thumbnails */
+.scan-overlay{z-index:30}.scpages{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0}.scpages figure{margin:0;width:96px;text-align:center;font-size:12px}.scpages img{width:96px;height:128px;object-fit:contain;background:#fff;border:1px solid var(--line,#ddd);border-radius:4px}.scpages figcaption{display:flex;justify-content:center;gap:6px;align-items:center}
