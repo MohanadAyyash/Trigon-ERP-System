@@ -926,6 +926,16 @@ Menu: **RFQs**.
 6. **Save**.
 7. Press **Award + PO** under the chosen supplier — a purchase order is created automatically.
 
+**Sending the request to suppliers.**
+- Fill in **Quotations due by**, **Deliver to** and, if needed, **Terms and requirements for the supplier**. They are printed on the request.
+- **Print request** / **PDF**: the request on the letterhead, with the items, units and quantities and empty price columns for the supplier to fill in. It never shows a price or another supplier.
+- **Send to suppliers** (when Outlook is switched on and your Microsoft account is connected): tick the suppliers and add an optional message, then press **Send to the selected suppliers**. Your changes are saved first.
+  - Each supplier receives a **separate** e-mail from your Outlook mailbox, at the e-mail address on their supplier card, with the request as a PDF addressed to them. No supplier sees the others.
+  - A supplier with no e-mail on their card is skipped (add the address on the supplier card first).
+  - The suppliers you sent to are added to the comparison, ready for their prices. Next to each supplier you see when it was sent, or why it failed.
+  - Sending to the same supplier again within 7 days asks you to confirm. Suppliers reply to your mailbox; type their prices in the comparison as before.
+- With SharePoint on, the request is saved in the project's **RFQs** folder once it has been sent. Prices typed in later do not change that copy.
+
 <!--img-->
 
 **📷 RFQ and supplier comparison**

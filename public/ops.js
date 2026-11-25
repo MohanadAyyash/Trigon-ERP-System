@@ -47,6 +47,38 @@ PAGES.documents = async () => {
 };
 
 // ---- RFQ: items x suppliers comparison ------------------------------------------------------------
+// "Send to suppliers" inside an RFQ: one separate Outlook e-mail per chosen supplier, to the address on the supplier card, with the RFQ PDF.
+// The server decides everything (rights, project, Outlook link, addresses); the browser only chooses suppliers and shows the results.
+async function rfqSendPanel(m, row, suppliers, saveFirst, onSent) {
+  const st = await api('GET', 'm365/integrations').catch(() => null); if (!st || window.STANDALONE || !st.outlook.enabled) return;
+  const box = document.createElement('div'); box.className = 'card'; const mod = m.querySelector('.modal'); mod.insertBefore(box, mod.querySelector('.acts'));
+  const invited = new Set(row.quotes.map(q => q.party_id));
+  const draw = async () => {
+    const log = await api('GET', `m365/mail/rfqs/${row.id}`).catch(() => []), last = id => log.find(x => x.party_id === id);
+    if (!st.me.can_send_mail) { box.innerHTML = `<h2>${tr('إرسال للموردين', 'Send to suppliers')}</h2><p class="muted">${st.me.linked ? tr('للإرسال عبر Outlook: افصل حساب Microsoft ثم اربطه من جديد في الإعدادات.', 'To send through Outlook: Disconnect and Connect your Microsoft account again in Settings.') : tr('للإرسال عبر Outlook اربط حساب Microsoft في الإعدادات.', 'To send through Outlook, connect your Microsoft account in Settings.')}</p>`; return; }
+    if (row.status !== 'open') { box.innerHTML = `<h2>${tr('إرسال للموردين', 'Send to suppliers')}</h2><p class="muted">${tr('الطلب مُرسى، لا يُرسل مرة أخرى.', 'This RFQ is awarded; it is not sent again.')}</p>`; return; }
+    box.innerHTML = `<h2>${tr('إرسال للموردين', 'Send to suppliers')}</h2>
+      <p class="muted">${tr('يصل كل مورد بريد منفصل من بريدك في Outlook، على البريد المسجّل في بطاقته، ومعه الطلب PDF بدون أسعار. يُحفظ ما يُرسل أولاً.', 'Each supplier gets a separate e-mail from your Outlook mailbox, to the address on their supplier card, with the request as a PDF (no prices). Your changes are saved first.')}</p>
+      <div class="tw"><table><tbody>${suppliers.map(p => { const l = last(p.id); return `<tr><td><label><input type="checkbox" data-sp="${p.id}" ${invited.has(p.id) ? 'checked' : ''} ${p.email ? '' : 'disabled'}> ${esc(p.name)}</label></td><td class="muted">${esc(p.email || tr('لا يوجد بريد في بطاقة المورد', 'no e-mail on the supplier card'))}</td>
+        <td>${l ? (l.status === 'sent' ? `<span class="ok">${MK.ok} ${tr('أُرسل', 'sent')} ${esc((l.sent_at || '').slice(0, 16).replace('T', ' '))}</span>` : `<span class="neg">${MK.bad} ${esc(l.error || '')}</span>`) : ''}</td></tr>`; }).join('')}</tbody></table></div>
+      <div class="f"><label>${tr('رسالة (اختياري)', 'Message (optional)')}</label><textarea id="rfqmsg" rows="2"></textarea></div>
+      <button type="button" class="btn" id="rfqsend">${tr('إرسال للموردين المحددين', 'Send to the selected suppliers')}</button>`;
+    $('#rfqsend', box).onclick = guard(async () => {
+      const party_ids = [...box.querySelectorAll('[data-sp]:checked')].map(x => +x.dataset.sp); if (!party_ids.length) throw new Error(tr('اختر مورداً واحداً على الأقل', 'Choose at least one supplier'));
+      await saveFirst();
+      const go = confirm_resend => api('POST', `m365/rfq-send/${row.id}`, { party_ids, message: $('#rfqmsg', box).value, confirm_resend });
+      let r = await go(false); const again = r.results.filter(x => x.status === 'already_sent');
+      if (again.length && confirm(`${again.map(x => x.name).join('، ')}\n${tr('أُرسل لهم هذا الطلب خلال الأيام السبعة الماضية. إرسال مرة أخرى؟', 'already received this request in the last 7 days. Send it again?')}`)) {
+        const r2 = await api('POST', `m365/rfq-send/${row.id}`, { party_ids: again.map(x => x.party_id), message: $('#rfqmsg', box).value, confirm_resend: true }); r = { sent: r.sent + r2.sent, results: [...r.results.filter(x => x.status !== 'already_sent'), ...r2.results] };
+      }
+      const bad = r.results.filter(x => ['failed', 'skipped'].includes(x.status));
+      toast(`${r.sent} ${tr('أُرسل', 'sent')}${bad.length ? ` · ${bad.length} ${tr('لم يُرسل', 'not sent')}: ${bad.map(x => `${x.name || '#' + x.party_id} (${x.error})`).join('; ')}` : ''}`);
+      const sentIds = r.results.filter(x => x.status === 'sent').map(x => x.party_id); sentIds.forEach(id => invited.add(id)); if (onSent) onSent(sentIds); draw();
+    });
+  };
+  await draw();
+}
+
 PAGES.rfq = async () => {
   const [rows, projects, parties] = await Promise.all([api('GET', 'rfqs'), api('GET', 'projects'), api('GET', 'parties').catch(() => [])]);
   const suppliers = parties.filter(p => p.type !== 'client');
@@ -56,8 +88,8 @@ PAGES.rfq = async () => {
   ${rows.map(r => `<tr class="click" data-id="${r.id}"><td>${esc(r.number)}</td><td>${esc(r.date)}</td><td>${esc(r.description || '')}</td><td>${esc(r.project_name || '')}</td><td class="n">${r.quotes.length}</td><td>${tag(r.status)}</td></tr>`).join('') || `<tr><td colspan="6" class="muted">${tr('لا توجد طلبات', 'No RFQs yet')}</td></tr>`}</tbody></table></div>`);
   const open = row => {
     const st = { items: row ? row.items.map(i => ({ ...i })) : [{ description: '', unit: '', qty: 1 }], quotes: row ? row.quotes.map(q => ({ party_id: q.party_id, rates: [...(q.rates || [])], delivery_days: q.delivery_days || '', notes: q.notes || '' })) : [] };
-    const m = modal(`<h2>${row ? esc(row.number) : tr('طلب أسعار جديد', 'New RFQ')} ${row ? tag(row.status) : ''}</h2><div class="f2">${field({ k: 'project_id', ar: 'المشروع', en: 'Project', type: 'select', options: refOpts(projects, p => `${p.code || ''} ${p.name}`) }, row?.project_id)}${field({ k: 'description', ar: 'الوصف', en: 'Description' }, row?.description)}</div><div id="mx"></div>
-      <div class="acts"><button class="btn" id="save">${tr('حفظ', 'Save')}</button><button class="btn sec" id="cancel">${tr('إغلاق', 'Close')}</button><span class="sp"></span>${row ? `<button class="btn bad" id="del">${tr('حذف', 'Delete')}</button>` : ''}</div>`, true);
+    const m = modal(`<h2>${row ? esc(row.number) : tr('طلب أسعار جديد', 'New RFQ')} ${row ? tag(row.status) : ''}</h2><div class="f2">${field({ k: 'project_id', ar: 'المشروع', en: 'Project', type: 'select', options: refOpts(projects, p => `${p.code || ''} ${p.name}`) }, row?.project_id)}${field({ k: 'description', ar: 'الوصف', en: 'Description' }, row?.description)}${field({ k: 'due_date', ar: 'آخر موعد لتقديم العروض', en: 'Quotations due by', type: 'date' }, row?.due_date)}${field({ k: 'deliver_to', ar: 'مكان التسليم', en: 'Deliver to' }, row?.deliver_to)}${field({ k: 'terms', ar: 'شروط ومتطلبات للمورد (تظهر في الطلب)', en: 'Terms and requirements for the supplier (printed on the request)', type: 'textarea', full: 1 }, row?.terms)}</div><div id="mx"></div>
+      <div class="acts"><button class="btn" id="save">${tr('حفظ', 'Save')}</button>${row ? `<button class="btn sec" id="rprint">${tr('طباعة الطلب', 'Print request')}</button><button class="btn sec" id="rpdf">PDF</button>` : ''}<button class="btn sec" id="cancel">${tr('إغلاق', 'Close')}</button><span class="sp"></span>${row ? `<button class="btn bad" id="del">${tr('حذف', 'Delete')}</button>` : ''}</div>`, true);
     const draw = () => {
       const tot = q => st.items.reduce((s, it, i) => s + (+it.qty || 0) * (+q.rates[i] || 0), 0), full = q => st.items.every((_, i) => +q.rates[i] > 0);
       const priced = st.quotes.filter(full), low = priced.length ? Math.min(...priced.map(tot)) : null;
@@ -83,10 +115,17 @@ PAGES.rfq = async () => {
     };
     draw();
     $('#cancel', m).onclick = closeModal;
+    const body = () => ({ project_id: val(m, 'project_id'), description: val(m, 'description'), due_date: val(m, 'due_date'), deliver_to: val(m, 'deliver_to'), terms: val(m, 'terms'), items: st.items.filter(i => i.description), quotes: st.quotes.filter(q => q.party_id) });
     $('#save', m).onclick = guard(async () => {
-      const body = { project_id: val(m, 'project_id'), description: val(m, 'description'), items: st.items.filter(i => i.description), quotes: st.quotes.filter(q => q.party_id) };
-      row ? await api('PUT', 'rfqs/' + row.id, body) : await api('POST', 'rfqs', body); closeModal(); render();
+      row ? await api('PUT', 'rfqs/' + row.id, body()) : await api('POST', 'rfqs', body()); closeModal(); render();
     });
+    if (row) {
+      // the request as the suppliers receive it (items and quantities, no prices)
+      $('#rprint', m).onclick = () => window.open(`/api/doc/rfqs/${row.id}?print=1`, '_blank'); $('#rpdf', m).onclick = () => window.open(`/api/doc/rfqs/${row.id}/pdf`, '_blank');
+      if (canOps('rfqs')) rfqSendPanel(m, row, suppliers, async () => { await api('PUT', 'rfqs/' + row.id, body()); },
+        ids => { ids.forEach(id => { if (!st.quotes.some(q => +q.party_id === id)) st.quotes.push({ party_id: id, rates: [], delivery_days: '', notes: '' }); }); draw(); }).catch(() => {});   // the server added them to the comparison too
+      if (window.m365DocPanel) m365DocPanel(m, 'rfqs', row.id).catch(() => {});   // SharePoint copy (after it is sent)
+    }
     if (row) $('#del', m).onclick = guard(async () => { if (confirmDel()) { await api('DELETE', 'rfqs/' + row.id); closeModal(); render(); } });
   };
   if ($('#add')) $('#add').onclick = () => open(null);

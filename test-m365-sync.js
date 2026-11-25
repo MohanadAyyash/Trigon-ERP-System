@@ -169,6 +169,17 @@ ctx.pdf = async html => { pdfCalls++; if (pdfBroken) throw new Error('no browser
       // the record panel works for the new types, with the project and role checks of the ERP
       const g = ok(await call('GET', `m365/documents/sub_certs/${cert}`, undefined, admin)); assert.equal(g.status, 'uploaded'); assert.equal(g.auto, true);
       assert.equal((await call('GET', `m365/documents/ipc/${inv2}`, undefined, await login('proc'))).s, 403, 'procurement cannot see invoice certificates');
+      // RFQs: saved once sent to suppliers; the prices typed in afterwards never make a new version, a change of the request does
+      const rfq = ok(await call('POST', 'rfqs', { project_id: P1, description: 'Rebar', items: [{ description: 'Rebar 12 mm', unit: 't', qty: 4 }] }, admin)).id, RQN = num('rfqs', rfq);
+      await tick(); assert.equal(row('rfqs', rfq), undefined, 'not sent yet: not saved');
+      exec("UPDATE rfqs SET sent_at=? WHERE id=?", new Date().toISOString(), rfq); await tick();
+      assert.equal(row('rfqs', rfq).status, 'uploaded'); assert.ok(paths().includes(`${V}/RFQs/${RQN}.pdf`));
+      const nR = mock.puts.length;
+      exec("UPDATE rfqs SET quotes=? WHERE id=?", JSON.stringify([{ party_id: sup, rates: [2500], delivery_days: 5 }]), rfq); await tick();
+      exec("UPDATE rfqs SET status='awarded', awarded_party_id=? WHERE id=?", sup, rfq); await tick();
+      assert.equal(mock.puts.length, nR, 'prices / award: no new version');
+      exec("UPDATE rfqs SET status='open', items=? WHERE id=?", JSON.stringify([{ description: 'Rebar 12 mm', unit: 't', qty: 6 }]), rfq); await tick();
+      assert.equal(mock.puts.length, nR + 1, 'a changed request replaces the copy'); assert.equal(mock.puts.at(-1).filePath.join('/'), `${V}/RFQs/${RQN}.pdf`);
       console.log('✔ approved subcontractor certificates, submitted payment applications, IPCs and subcontract agreements saved to their folders; drafts are not');
 
       // ---- retry queue: Microsoft down → failed with a growing wait; nothing lost; recovers by itself ----
@@ -295,7 +306,7 @@ ctx.pdf = async html => { pdfCalls++; if (pdfBroken) throw new Error('no browser
       // choosing a type later moves the next copy to that folder (the earlier copy is left, never deleted)
       ok(await call('PUT', 'documents/' + nt, { doc_type: 'hse' }, admin)); await tick(); assert.equal(folderOf(nt), 'HSE'); assert.ok(paths().includes(`${V}/HSE/nt.pdf`));
       // no way out of the attachment's own place: every copy is under the root, in its project / party folder, in a fixed type folder
-      const FOLDERS = ['Drawings', 'Delivery Notes', 'Supplier Invoices', 'Contracts', 'RFIs', 'Submittals', 'HSE', 'Site Photos', 'Documents', 'Supplier Documents', 'Purchase Orders', 'Invoices', 'Payment Certificates', 'Payment Applications', 'Quotations'];
+      const FOLDERS = ['Drawings', 'Delivery Notes', 'Supplier Invoices', 'Contracts', 'RFIs', 'Submittals', 'HSE', 'Site Photos', 'Documents', 'Supplier Documents', 'Purchase Orders', 'Invoices', 'Payment Certificates', 'Payment Applications', 'Quotations', 'RFQs'];
       for (const p of mock.puts.map(x => x.filePath)) {
         assert.equal(p[0], 'Trigon Civil Projects'); assert.ok(p.every(s => s && s !== '..' && s !== '.' && !/[\\/]/.test(s)), 'no traversal: ' + p.join('/'));
         assert.ok(FOLDERS.includes(p.at(-2)), 'type folder from the fixed list: ' + p.join('/'));

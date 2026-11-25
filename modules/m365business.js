@@ -54,6 +54,7 @@ module.exports = ctx => {
   // automatic sync queue (additive): the version wanted in SharePoint (want_fp), the version there (src_fp), back-off after failures
   for (const [c, d] of [['want_fp', 'TEXT'], ['src_fp', 'TEXT'], ['next_attempt_at', 'TEXT'], ['fails', 'INTEGER DEFAULT 0'], ['source', 'TEXT']])
     if (!db.prepare('PRAGMA table_info(m365_documents)').all().some(x => x.name === c)) db.exec(`ALTER TABLE m365_documents ADD COLUMN ${c} ${d}`);
+  if (!db.prepare('PRAGMA table_info(m365_mail_log)').all().some(x => x.name === 'party_id')) db.exec('ALTER TABLE m365_mail_log ADD COLUMN party_id INTEGER');   // RFQ: which supplier
   db.exec('CREATE INDEX IF NOT EXISTS m365_documents_due ON m365_documents(status, next_attempt_at)');
   const now = () => new Date().toISOString();
   const env = () => (typeof process !== 'undefined' && process.env) || {};
@@ -142,7 +143,9 @@ module.exports = ctx => {
       // a void invoice is not printed by the ERP: the copy already in SharePoint stays as issued; the void / credit note is the record
       ready: r => r.voided ? 'This invoice is void — the ERP does not print void invoices (the copy already in SharePoint stays as issued)' : null, mailReady: r => r.voided ? 'This invoice is void' : null },
     subcontracts: { docType: 'Contracts', acl: 'sc-agreement', table: 'subcontracts', render: 'sc_agreement', label: 'Subcontract Agreement', number: r => r.agreement_no || `SC-${r.id}`, ready: () => null, mailReady: () => null },
-    rfqs: { docType: 'RFQs', acl: 'rfqs', table: 'rfqs', render: null, label: 'Request for Quotation', ready: () => 'RFQs have no printed form to store', mailReady: r => r.status === 'open' ? null : 'This RFQ is closed' },
+    // an RFQ goes to SharePoint once it was sent to suppliers from the system; the suppliers' prices typed in later do not change its copy
+    rfqs: { docType: 'RFQs', acl: 'rfqs', table: 'rfqs', render: 'rfqs', label: 'Request for Quotation', ready: r => r.sent_at ? null : 'An RFQ is stored in SharePoint once it is sent to suppliers from the system',
+      fp: r => { const { quotes, status, awarded_party_id, sent_at, ...x } = r; return x; }, mailReady: r => r.status === 'open' ? null : 'This RFQ is closed' },
     // subcontractor payment certificates (approved), client payment applications (submitted), interim payment certificates (of a tax invoice)
     sub_certs: { docType: 'Payment Certificates', acl: 'sub_certs', sql: 'SELECT c.*, s.project_id FROM sub_certs c LEFT JOIN subcontracts s ON s.id=c.subcontract_id', render: 'sub_certs', label: 'Subcontractor Payment Certificate',
       ready: r => r.status === 'approved' ? null : 'Only an approved subcontractor payment certificate is stored in SharePoint', mailReady: r => r.status === 'approved' ? null : 'This certificate is not approved yet' },
@@ -153,6 +156,7 @@ module.exports = ctx => {
   };
   const kSql = k => k.sql || `SELECT * FROM ${k.table}`;
   const kKey = k => k.key || 'id';
+  const kFp = (k, r) => k.fp ? k.fp(r) : r;          // what makes a new SharePoint version (default: the whole row)
   const kGet = (k, id) => /^\d+$/.test(String(id)) ? db.prepare(`SELECT * FROM (${kSql(k)}) WHERE ${kKey(k)}=?`).get(+id) : null;
   const scopeOk = (me, projectId) => { const sc = ctx.siteScope ? ctx.siteScope(me) : null; return !sc || projectId == null || sc.projects.has(+projectId); };
   // the record, after the ERP's own role and project checks (write = upload / send). 404 for a record the user may not see.
@@ -231,7 +235,7 @@ module.exports = ctx => {
     const c = bizCfg(); noteBizConfig(c);
     const { k, r, rid } = record(me, entity, id, true);
     const why = k.ready(r); if (why) throw fail(409, why, 'not_ready');
-    return queued(c, entity, rid, k.docType, fpOf(r), async () => recordJob(c, entity, k, r, rid, await recordPdf(entity, rid, me), me.username));
+    return queued(c, entity, rid, k.docType, fpOf(kFp(k, r)), async () => recordJob(c, entity, k, r, rid, await recordPdf(entity, rid, me), me.username));
   }
   // attachments (documents table): supplier papers, delivery notes, drawings, site photos… copied, never moved; the source stays in the ERP.
   // Each goes to its place by its type (what the user typed as the type, else the file: images → Site Photos). Employee and company papers
@@ -314,7 +318,7 @@ module.exports = ctx => {
       for (const r of db.prepare(kSql(k)).all()) {
         if (a.from && String(r[k.date || 'date'] || '9999') < a.from) continue;
         if (k.ready(r)) continue;
-        want(entity, r[kKey(k)], k.docType, fpOf(r));
+        want(entity, r[kKey(k)], k.docType, fpOf(kFp(k, r)));
       }
     }
     if (a.attachments) {
@@ -340,7 +344,7 @@ module.exports = ctx => {
       } else {
         const k = KINDS[d.entity], r = k && k.render && k.docType === d.doc_type ? kGet(k, d.entity_id) : null;
         if (!r || k.ready(r)) return drop(), 'dropped';
-        fp = fpOf(r); await recordJob(c, d.entity, k, r, d.entity_id, await recordPdf(d.entity, d.entity_id, SYS), SYS.username);
+        fp = fpOf(kFp(k, r)); await recordJob(c, d.entity, k, r, d.entity_id, await recordPdf(d.entity, d.entity_id, SYS), SYS.username);
       }
       synced(d.entity, d.entity_id, d.doc_type, fp, 'auto'); return 'uploaded';
     } catch (e) {
@@ -389,14 +393,20 @@ module.exports = ctx => {
   // ---------- Outlook (delegated Mail.Send: the user's own mailbox) ----------
   const EMAIL = /^[^\s@<>()",;:]+@[^\s@<>()",;:]+\.[a-z]{2,}$/i;
   const list = v => [...new Set(String(v || '').split(/[,;\s]+/).map(x => x.trim().toLowerCase()).filter(Boolean))];
-  async function sendMail(me, entity, id, body) {
+  // who may send this record from their own mailbox: Outlook on, ERP rights on the record (role + project), record state, own link with Mail.Send
+  function mailCheck(me, entity, id, body) {
     const c = bizCfg(); noteBizConfig(c);
     if (!c.outlook.enabled) throw fail(503, 'Sending through Outlook is not switched on', 'not_configured');
-    const { k, r, rid, number } = record(me, entity, id, true);
-    const why = k.mailReady(r); if (why) throw fail(409, why, 'not_ready');
+    const rec = record(me, entity, id, true);
+    const why = rec.k.mailReady(rec.r); if (why) throw fail(409, why, 'not_ready');
     if (!db.prepare('SELECT 1 FROM m365_connections WHERE user_id=?').get(me.id)) throw fail(409, 'Link your Microsoft 365 account first (Settings → Microsoft 365 account)', 'unlinked');
     if (!(ctx.m365Granted ? ctx.m365Granted(me.id) : []).includes('Mail.Send')) throw fail(409, 'Your Microsoft link does not include sending mail yet — Disconnect and Connect again in Settings to allow it', 'consent_required');
     if (body.from !== undefined || body.sender !== undefined) throw fail(400, 'The sender is always your own Microsoft account', 'bad_sender');
+    return { c, ...rec };
+  }
+  const htmlEsc = s => String(s).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+  async function sendMail(me, entity, id, body) {
+    const { c, k, r, rid, number } = mailCheck(me, entity, id, body);
     const to = list(body.to), cc = list(body.cc);
     if (!to.length || to.length > 5 || cc.length > 5 || ![...to, ...cc].every(x => EMAIL.test(x))) throw fail(400, 'Enter 1–5 valid e-mail addresses (and at most 5 in copy)');
     const msg = String(body.message || '').slice(0, 4000), key = [...to].sort().join(',');
@@ -423,6 +433,53 @@ module.exports = ctx => {
     }
     logRow('sent', null); sysAudit(me.username, 'outlook-send', rid, `${entity} ${number} to ${key}${cc.length ? ' cc ' + cc.join(',') : ''} (${attach})`); mark('outlook', true);
     return { ok: 1, sent_at: now(), attachment: attach };
+  }
+  // A request for quotation to several suppliers: one separate e-mail per supplier (no supplier sees another), to the e-mail address on
+  // that supplier's card in the ERP (never an address typed in the request), with the RFQ PDF addressed to that supplier (no prices).
+  // One supplier failing does not stop the others; each result is logged per supplier. The RFQ itself is only marked as sent (sent_at,
+  // first time) and the suppliers it went to are added to its comparison (with empty prices) if they are not there yet.
+  async function sendRfq(me, id, body) {
+    const { c, k, r, rid, number } = mailCheck(me, 'rfqs', id, body);
+    const ids = [...new Set((Array.isArray(body.party_ids) ? body.party_ids : []).map(Number))];
+    if (!ids.length || ids.length > 20 || !ids.every(n => Number.isInteger(n) && n > 0)) throw fail(400, 'Choose 1–20 suppliers');
+    const S = ctx.getSettings(), msg = String(body.message || '').slice(0, 4000), subject = `${k.label} ${number} — ${S.company_name || 'Trigon'}`.slice(0, 200), results = [];
+    for (const pid of ids) {
+      const p = db.prepare('SELECT id, name, email, type FROM parties WHERE id=?').get(pid);
+      if (!p || p.type === 'client') { results.push({ party_id: pid, status: 'skipped', error: 'Not a supplier' }); continue; }
+      const to = list(p.email).filter(x => EMAIL.test(x)).slice(0, 5), out = { party_id: pid, name: p.name };
+      if (!to.length) { results.push({ ...out, status: 'skipped', error: 'No valid e-mail address on the supplier card' }); continue; }
+      const key = [...to].sort().join(','), logRow = (status, error, attach) => db.prepare('INSERT INTO m365_mail_log(entity,entity_id,recipients,subject,status,error,sent_by,sent_at,attachment,party_id) VALUES(?,?,?,?,?,?,?,?,?,?)').run('rfqs', rid, key, subject, status, error, me.username, now(), attach, pid);
+      const last = db.prepare("SELECT sent_at FROM m365_mail_log WHERE entity='rfqs' AND entity_id=? AND recipients=? AND status='sent' AND sent_at>? ORDER BY id DESC LIMIT 1").get(rid, key, new Date(Date.now() - 7 * 864e5).toISOString());
+      if (last && body.confirm_resend !== true) { results.push({ ...out, status: 'already_sent', sent_at: last.sent_at }); continue; }
+      let pdf;
+      try { pdf = await ctx.pdf(ctx.renderPage('rfqs', rid, me, false, new URLSearchParams({ party: String(pid) })).html); } catch { pdf = null; }
+      if (!Buffer.isBuffer(pdf) || !pdf.length || pdf.length > MAX_ATTACH) {
+        const m = pdf && pdf.length > MAX_ATTACH ? 'The RFQ PDF is too large to attach' : 'The RFQ PDF could not be made on this server (PDF engine not available)';
+        logRow('failed', m, 'none'); results.push({ ...out, status: 'failed', error: m }); continue;
+      }
+      const html = `<div style="font-family:Arial,sans-serif;font-size:13px"><p>Dear ${htmlEsc(p.name || 'Sir / Madam')},</p>${msg ? `<p>${htmlEsc(msg).replace(/\n/g, '<br>')}</p>` : ''}
+        <p>Please find attached our request for quotation <b>${htmlEsc(number)}</b>${r.description ? ` (${htmlEsc(r.description)})` : ''}. Kindly send your quotation${r.due_date ? ` by <b>${htmlEsc(r.due_date)}</b>` : ''} in reply to this e-mail, quoting our reference.</p>
+        <p>${htmlEsc(S.company_name || '')}</p></div>`;
+      try {
+        await userGraph(c, me.id, 'POST', '/me/sendMail', { json: { message: { subject, body: { contentType: 'HTML', content: html }, toRecipients: to.map(a => ({ emailAddress: { address: a } })),
+          attachments: [{ '@odata.type': '#microsoft.graph.fileAttachment', name: G.safeName(`${number}.pdf`), contentType: 'application/pdf', contentBytes: pdf.toString('base64') }] }, saveToSentItems: true }, expect: 'none', idempotent: false });
+      } catch (e) {
+        const m = e.graph || e.status ? e.message : 'Outlook could not send the message';
+        logRow('failed', String(m).slice(0, 200), 'pdf'); sysAudit(me.username, 'outlook-send-failed', rid, `rfqs ${number} to ${p.name} <${key}>: ${m}`); mark('outlook', false, m);
+        results.push({ ...out, status: 'failed', error: m }); continue;
+      }
+      logRow('sent', null, 'pdf'); sysAudit(me.username, 'outlook-send', rid, `rfqs ${number} to ${p.name} <${key}> (pdf)`); mark('outlook', true);
+      results.push({ ...out, status: 'sent', sent_at: now() });
+    }
+    const sent = results.filter(x => x.status === 'sent');
+    if (sent.length) {
+      const cur = db.prepare('SELECT quotes, sent_at FROM rfqs WHERE id=?').get(rid);
+      let quotes; try { quotes = JSON.parse(cur.quotes || '[]'); } catch { quotes = []; }
+      for (const x of sent) if (!quotes.some(q => +q.party_id === x.party_id)) quotes.push({ party_id: x.party_id, rates: [], delivery_days: '', notes: '' });
+      db.prepare('UPDATE rfqs SET quotes=?, sent_at=COALESCE(sent_at, ?) WHERE id=?').run(JSON.stringify(quotes), now(), rid);
+      if (ctx.hooks.afterWrite) ctx.hooks.afterWrite();                 // SharePoint copy of the sent RFQ
+    }
+    return { sent: sent.length, results };
   }
 
   // ---------- Teams (channel webhook; no Graph permission) ----------
@@ -498,7 +555,7 @@ module.exports = ctx => {
 
   return {
     async handle(req, res, url, [a, b, c, d, e2], me) {
-      if (a !== 'm365' || !['integrations', 'documents', 'attachments', 'mail', 'sharepoint', 'teams', 'outlook', 'migrate', 'sync'].includes(b)) return false;
+      if (a !== 'm365' || !['integrations', 'documents', 'attachments', 'mail', 'sharepoint', 'teams', 'outlook', 'migrate', 'sync', 'rfq-send'].includes(b)) return false;
       if (STANDALONE) return send(res, 404, { error: 'Microsoft 365 is not available in the standalone edition' }), true;
       const m = req.method;
       try {
@@ -512,13 +569,17 @@ module.exports = ctx => {
           if (m === 'GET') { const r = attachment(me, c, false), t = attTarget(r); return send(res, 200, { ...(docView(docRow('documents', r.id, t.docType)) || { status: 'not_uploaded' }), target: t.folders, auto: autoCfg().on && autoCfg().attachments }), true; }
           if (m === 'POST' && d === 'upload') { if (limited('up:' + me.id, 30, 600e3)) throw fail(429, 'Too many uploads — wait a few minutes'); await readBody(req).catch(() => ({})); return send(res, 200, await uploadAttachment(me, c)), true; }
         }
+        if (b === 'rfq-send' && c && m === 'POST') {                // an RFQ to several suppliers, one e-mail each
+          if (limited('rfq:' + me.id, 10, 3600e3)) throw fail(429, 'Too many sends in the last hour — wait a while');
+          const body = await readBody(req); return send(res, 200, await sendRfq(me, c, body || {})), true;
+        }
         if (b === 'mail' && c && d && m === 'POST') {
           if (limited('mail:' + me.id, 20, 3600e3)) throw fail(429, 'Too many messages in the last hour — wait a while');
           const body = await readBody(req); return send(res, 200, await sendMail(me, c, d, body || {})), true;
         }
         if (b === 'mail' && c && d && m === 'GET') {               // what was sent for this record (who / when / to whom)
           const { rid } = record(me, c, d, false);
-          return send(res, 200, db.prepare('SELECT recipients, subject, status, error, sent_by, sent_at, attachment FROM m365_mail_log WHERE entity=? AND entity_id=? ORDER BY id DESC LIMIT 20').all(c, rid)), true;
+          return send(res, 200, db.prepare('SELECT recipients, subject, status, error, sent_by, sent_at, attachment, party_id FROM m365_mail_log WHERE entity=? AND entity_id=? ORDER BY id DESC LIMIT 20').all(c, rid)), true;
         }
         if (b === 'outlook' && c === 'test' && m === 'POST') {     // safe: reads the user's own profile, sends nothing
           if (limited('test:' + me.id, 10, 600e3)) throw fail(429, 'Too many tests — wait a few minutes');

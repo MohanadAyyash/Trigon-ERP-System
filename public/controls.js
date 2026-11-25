@@ -109,7 +109,7 @@ let m365IntCache = null;
 const m365Ints = async (fresh) => (!fresh && m365IntCache) || (m365IntCache = await api('GET', 'm365/integrations').catch(() => null));
 window.m365DocPanel = async (el, entity, id) => {
   const st = await m365Ints(); if (!st || window.STANDALONE) return;
-  const canMail = st.outlook.enabled && ['purchase_orders', 'rfqs', 'quotes', 'invoices'].includes(entity), canSp = st.sharepoint.configured && entity !== 'rfqs';
+  const canMail = st.outlook.enabled && ['purchase_orders', 'quotes', 'invoices'].includes(entity), canSp = st.sharepoint.configured;   // RFQs: sent from their own "Send to suppliers" panel
   if (!canMail && !canSp) return;
   let box = el; if (el.classList.contains('overlay')) { box = document.createElement('div'); box.className = 'card'; const mod = el.querySelector('.modal'); mod.insertBefore(box, mod.querySelector('.acts')); }
   const draw = async () => {
