@@ -427,7 +427,7 @@ Menu: **Quotations**.
 7. Terms come from Settings and can be edited for this quotation.
 8. Save stores the quotation in the list.
 
-**Cover fields (optional):** attention, project location, plot no., NOC reference, scope of work, contract basis. Whatever is left empty is not printed. **Payment terms on the cover**: one stage per line, written as `25% - Upon signing of the agreement`.
+**Cover fields (optional):** attention, project location, plot no., NOC reference, scope of work, contract basis. Whatever is left empty is not printed. **Payment terms on the cover**: one stage per line, e.g. `25% - Upon signing of the agreement`, `50% advance payment` or `AED 5,000 on mobilisation`. Every line appears on the cover, in order, with the percentage or amount at its start in larger type. A line that does not start with a figure is shown as text only.
 
 **Bill of quantities:**
 - **Section** — type the section name on each line (e.g. `Phase 1 — Pre-construction`). Lines with the same name are grouped in the print, numbered A1, A2, B1… with a sub-total per section. With no section on any line they print numbered 1, 2, 3 without sections.
