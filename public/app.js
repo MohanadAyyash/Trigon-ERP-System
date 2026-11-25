@@ -234,7 +234,7 @@ new MutationObserver(() => { const m = document.getElementById('main'); if (m) m
 const main = html => { $('#main').innerHTML = html; };
 
 // ---- printing any page on the company letterhead ------------------------------------
-const xl = (name, qs = '') => `<a class="btn sec sm noprint" href="/api/export/${name}${qs}" target="_blank">Excel</a>`;
+const xl = (name, qs = '') => ['site_engineer', 'foreman'].includes(ME.role) ? '' : `<a class="btn sec sm noprint" href="/api/export/${name}${qs}" target="_blank">Excel</a>`;   // project-limited roles get no exports (server)
 // iPhone / iPad: the home-screen app cannot print (window.print does nothing there) and Safari blocks a delayed print,
 // so the page is turned into a PDF on the server and opened in the phone's PDF viewer (share → print, save, send)
 const iosDevice = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
