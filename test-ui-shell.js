@@ -20,7 +20,7 @@ async function launch() {
   const prof = fs.mkdtempSync(path.join(os.tmpdir(), 'erp-ui-chrome-'));
   proc = spawn(exe, ['--headless=new', '--no-sandbox', '--disable-gpu', '--no-first-run', '--remote-debugging-port=0', `--user-data-dir=${prof}`, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
   const wsUrl = await new Promise((res, rej) => {
-    let buf = ''; const t = setTimeout(() => rej(new Error('browser did not start: ' + buf.slice(-400))), 20000);
+    let buf = ''; const t = setTimeout(() => rej(new Error('browser did not start: ' + buf.slice(-400))), 60000);   // a slow CI machine can need more than 20 s
     proc.stderr.on('data', d => { buf += d; const m = /DevTools listening on (ws:\/\/\S+)/.exec(buf); if (m) { clearTimeout(t); res(m[1]); } });
     proc.on('exit', c => rej(new Error(`browser exited (${c}): ${buf.slice(-400)}`)));
   });
