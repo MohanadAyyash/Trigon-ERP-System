@@ -2115,9 +2115,15 @@ Positive amounts are **in the partner's favour**; amounts in brackets are **owed
 An **expense claim** = an employee paid a company expense from own money (fuel, small items, fees…) and asks for it back.
 
 **The employee submits the claim:** menu **My account & claims** → **+ Expense claim**: date, what was paid for, amount, VAT (if on the invoice), category, project, receipt number, and the receipt → **Send for approval**.
-- **Scan with the camera** (on a phone) opens the camera straight away. Photograph the receipt page by page; **Photograph the next page** adds a page, and **×** removes one.
+- **Scan with the camera** (on a phone) works like a scanner app:
+  - The camera opens straight away. Put the receipt on a dark surface and point the phone at it.
+  - The paper's edges are outlined, and once you hold the phone still for a moment the picture is **taken by itself**, with no button.
+  - The paper is cut out and straightened, so the page comes out upright even if photographed at an angle.
+  - Put the next page and it is taken by itself too. The same page is not taken twice.
+- The round shutter button is still there if you prefer, and **Automatic capture** can be switched off. **×** removes a page.
 - Each page is cleaned up like a scanner would: white paper, black text, and shadows evened out. Untick **Clean up as a document** to keep the photo as it is.
-- **Attach the PDF** joins all pages into one PDF attached to the claim. You can also pick photos from the phone (**From photos**) or attach an existing file (photo or PDF).
+- If the device does not allow the live camera, the phone's own camera opens instead, and each photo is cut out and straightened the same way.
+- **Attach the PDF** joins all pages into one PDF attached to the claim. You can also pick photos from the phone (**From photos**, also cut out and straightened) or attach an existing file (photo or PDF).
 - A claim sent without a receipt shows **Scan** and **Attach** in **My expense claims** while it waits for approval.
 - The menu shows for every user linked to an employee record. An employee account is always linked; other staff accounts (engineer, manager…) are linked by the administrator: Settings → Users → **Employee**.
 - A receipt can be attached later, and the claim withdrawn, while it is pending.
