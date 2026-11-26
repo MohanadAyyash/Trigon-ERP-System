@@ -51,6 +51,39 @@ function checkPdf(buf, pages) {
 }
 console.log('✔ PDF writer: one page per photo, JPEG embedded as is, exact offsets / lengths; clean-up: white paper, black ink, grey');
 
+// ---------- finding the paper and straightening it ----------
+{
+  const { detectQuad, warp, pageSize, inset } = require('./public/scan.js');
+  let seed = 7; const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const inside = (q, x, y) => { let c = false; for (let i = 0, j = 3; i < 4; j = i++) { const [xi, yi] = q[i], [xj, yj] = q[j]; if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c; } return c; };
+  // a 320×240 "photo": desk (with a light gradient and noise), paper with lines of text
+  const scene = (q, { bg = 60, paper = 225, text = true } = {}) => { const a = new Uint8ClampedArray(320 * 240 * 4);
+    for (let y = 0; y < 240; y++) for (let x = 0; x < 320; x++) { let v = inside(q, x + 0.5, y + 0.5) ? paper : bg + (x / 320) * 25;
+      if (text && v === paper && y % 14 < 3 && (x * 7 + y) % 23 < 15) v = paper > 128 ? 40 : 230; v += (rnd() - 0.5) * 12; a.set([v, v * 0.98, v * 0.95, 255], (y * 320 + x) * 4); }
+    return a; };
+  const rot = (cx, cy, w, h, deg) => { const r = deg * Math.PI / 180; return [[-w / 2, -h / 2], [w / 2, -h / 2], [w / 2, h / 2], [-w / 2, h / 2]].map(([x, y]) => [cx + x * Math.cos(r) - y * Math.sin(r), cy + x * Math.sin(r) + y * Math.cos(r)]); };
+  const tlFirst = q => { let k = 0; for (let i = 1; i < 4; i++) if (q[i][0] + q[i][1] < q[k][0] + q[k][1]) k = i; return [0, 1, 2, 3].map(i => q[(k + i) % 4]); };
+  const err = (a, b) => Math.max(...a.map((p, i) => Math.hypot(p[0] - b[i][0], p[1] - b[i][1])));
+  const cases = { upright: [[80, 40], [240, 40], [240, 220], [80, 220]], 'turned 20°': rot(160, 130, 120, 170, 20), 'turned 45°': rot(160, 125, 110, 150, 45), 'turned -30°': rot(165, 120, 150, 110, -30),
+    perspective: [[110, 30], [215, 35], [270, 225], [50, 220]], 'steep angle': [[130, 40], [190, 42], [300, 225], [20, 220]], 'fills the frame': [[8, 6], [312, 10], [315, 236], [5, 232]] };
+  for (const [k, q] of Object.entries(cases)) {
+    const r = detectQuad(scene(q), 320, 240); assert.ok(r, k + ': found');
+    // corners in order top-left, top-right, bottom-right, bottom-left, within 4 px (1.3 % of the width)
+    const want = tlFirst(q.slice().sort((a, b) => Math.atan2(a[1] - 120, a[0] - 160) - Math.atan2(b[1] - 120, b[0] - 160)));
+    const tol = k === 'steep angle' ? 6 : 4;                     // the narrow far edge of a steeply tilted page is the hardest (the crop is inset 1.5 %)
+    assert.ok(err(r.corners, want) < tol, `${k}: corners within ${tol} px (${err(r.corners, want).toFixed(1)})`);
+  }
+  assert.ok(detectQuad(scene(rot(160, 120, 130, 170, 15), { bg: 215, paper: 70 }), 320, 240), 'dark paper on a light desk');
+  assert.equal(detectQuad(scene([[0, 0], [1, 0], [1, 1], [0, 1]]), 320, 240), null, 'an empty desk (a gradient only) is not a paper');
+  assert.equal(detectQuad(scene(cases.upright, { bg: 218, paper: 226 }), 320, 240), null, 'white paper on a white desk: not found (the scanner asks for a dark surface)');
+  // straightened: a paper photographed at an angle becomes an upright page of its own shape, with no desk left at the edges
+  const src = scene(cases.perspective, { text: false }), r = detectQuad(src, 320, 240), c = inset(r.corners), [W, H] = pageSize(c), out = warp(src, 320, 240, c, W, H);
+  let dark = 0; for (let i = 0; i < W * H; i++) if (out[i * 4] < 150) dark++; assert.equal(dark, 0, 'no desk in the straightened page');
+  const r2 = detectQuad(scene(rot(160, 120, 100, 150, 30), { text: false }), 320, 240), [W2, H2] = pageSize(r2.corners); assert.ok(Math.abs(W2 / H2 - 100 / 150) < 0.05, `shape kept: ${W2}×${H2}`);
+  assert.deepEqual(pageSize([[0, 0], [3400, 0], [3400, 4400], [0, 4400]]), [1314, 1700], 'at most 1700 px on the longest side');
+}
+console.log('✔ paper found on the desk upright, turned 20° / 45° / −30°, in perspective, at a steep angle, filling the frame, dark on light (corners within 4 px, 6 px at a steep angle); not on an empty desk or white on white; straightened to its shape with no desk at the edges');
+
 // ---------- 2. in a real browser: scan two pages from the employee's claim form ----------
 const { findBrowser } = require('./lib/pdf');
 const skipPdf = process.env.SKIP_PDF; delete process.env.SKIP_PDF;
@@ -60,10 +93,24 @@ if (!exe || typeof WebSocket !== 'function') { console.log(`test-scan: browser p
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'erp-scanui-')); process.env.ZOHO_NO_SCHEDULER = '1'; process.env.SALES_NO_SCHEDULER = '1';
 const { server, ctx } = require('./server.js');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const CAM = { W: 640, H: 480, cx: 330, cy: 240, w: 250, h: 330, deg: 12 };               // the paper in the fake camera picture
+function fakeCamera(file) {                                                             // YUV4MPEG2 (I420), a few identical frames (Chrome loops it)
+  const { W, H, cx, cy, w, h, deg } = CAM, r = deg * Math.PI / 180, Y = Buffer.alloc(W * H), UV = Buffer.alloc(W * H / 2, 128);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const dx = x - cx, dy = y - cy, u = dx * Math.cos(r) + dy * Math.sin(r), v = -dx * Math.sin(r) + dy * Math.cos(r), inPaper = Math.abs(u) < w / 2 && Math.abs(v) < h / 2;
+    const text = inPaper && Math.abs(u) < w / 2 - 20 && ((v + h / 2) % 22) > 16 && ((u * 3 + v) % 40 + 40) % 40 < 30;
+    Y[y * W + x] = text ? 45 : inPaper ? 228 : 42 + (x / W) * 20;
+  }
+  const frame = Buffer.concat([Buffer.from('FRAME\n'), Y, UV]);
+  fs.writeFileSync(file, Buffer.concat([Buffer.from(`YUV4MPEG2 W${W} H${H} F10:1 Ip A1:1 C420jpeg\n`), frame, frame, frame, frame]));
+}
 let proc, ws, seq = 0; const pending = new Map();
 async function launch() {
   const prof = fs.mkdtempSync(path.join(os.tmpdir(), 'erp-scan-chrome-'));
-  proc = spawn(exe, ['--headless=new', '--no-sandbox', '--disable-gpu', '--no-first-run', '--remote-debugging-port=0', `--user-data-dir=${prof}`, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  // a fake back camera: a video of a receipt (white paper with text, turned 12°) lying on a dark desk
+  const cam = path.join(prof, 'camera.y4m'); fakeCamera(cam);
+  proc = spawn(exe, ['--headless=new', '--no-sandbox', '--disable-gpu', '--no-first-run', '--remote-debugging-port=0', `--user-data-dir=${prof}`,
+    '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-video-capture=${cam}`, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
   const wsUrl = await new Promise((res, rej) => { let buf = ''; const t = setTimeout(() => rej(new Error('browser did not start')), 60000);   // a slow CI machine can need more than 20 s
     proc.stderr.on('data', d => { buf += d; const m = /DevTools listening on (ws:\/\/\S+)/.exec(buf); if (m) { clearTimeout(t); res(m[1]); } }); });
   const port = new URL(wsUrl).port; let page;
@@ -85,43 +132,75 @@ server.listen(0, async () => {
     const u = (await api('POST', 'users', { username: 'worker1', password: 'pass1234', role: 'viewer' }, ck)).j.id; assert.equal((await api('PUT', 'users/' + u, { employee_id: emp }, ck)).s, 200);
     await launch(); await cdp('Page.enable'); await cdp('Runtime.enable');
     await cdp('Page.navigate', { url: base + 'index.html' }); await waitFor('document.readyState === "complete"');
+    // the service worker reloads the page once when it first takes control (mobile.js): let that happen before the test starts
+    // (as in test-ui-shell.js); otherwise a step can land in the middle of that reload ("Inspected target navigated or closed")
+    await waitFor(`'serviceWorker' in navigator ? navigator.serviceWorker.ready.then(() => true) : true`, 20000);
+    await waitFor(`!('serviceWorker' in navigator) || !!navigator.serviceWorker.controller`, 20000);
+    await sleep(500); await waitFor('document.readyState === "complete"');
     assert.equal(await ev(`fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'worker1', password: 'pass1234' }) }).then(r => r.status)`), 200);
-    await ev(`localStorage.lang = 'en'; true`); await cdp('Page.navigate', { url: 'about:blank' }); await sleep(100);
-    await cdp('Page.navigate', { url: base + 'index.html#myaccount' }); await waitFor(`!!document.querySelector('#nc')`);
-    await ev(`document.querySelector('#nc').click(); true`); await waitFor(`!!document.querySelector('#scanrc')`);
-    await ev(`document.querySelector('#scanrc').click(); true`); await waitFor(`!!document.querySelector('#scpick')`);
-    assert.equal(await ev(`document.querySelector('#sccam').getAttribute('capture')`), 'environment', 'the camera button opens the back camera');
-    // two "photos" (made on a canvas: grey paper with dark text), given to the picker as if chosen on the phone
-    await ev(`(async () => { const mk = (w, h, t) => new Promise(ok => { const c = document.createElement('canvas'); c.width = w; c.height = h; const x = c.getContext('2d'); x.fillStyle = '#b9b29c'; x.fillRect(0, 0, w, h); x.fillStyle = '#333'; x.font = '40px sans-serif'; x.fillText(t, 40, 120); c.toBlob(b => ok(new File([b], t + '.jpg', { type: 'image/jpeg' })), 'image/jpeg', 0.9); });
-      const dt = new DataTransfer(); dt.items.add(await mk(1200, 1600, 'PAGE ONE')); dt.items.add(await mk(1600, 1000, 'PAGE TWO'));
-      const inp = document.querySelector('#scpick'); inp.files = dt.files; inp.dispatchEvent(new Event('change')); return true; })()`);
-    await waitFor(`document.querySelectorAll('#scpages figure').length === 2 && !document.querySelector('#scok').disabled`, 15000);
-    // the clean-up is applied (the preview of a page is grey: equal channels at a paper pixel)
-    assert.ok(await ev(`new Promise(ok => { const im = new Image(); im.onload = () => { const c = document.createElement('canvas'); c.width = im.width; c.height = im.height; const x = c.getContext('2d'); x.drawImage(im, 0, 0); const d = x.getImageData(5, 5, 1, 1).data; ok(Math.abs(d[0] - d[1]) < 6 && Math.abs(d[1] - d[2]) < 6 && d[0] > 230); }; im.src = document.querySelector('#scpages img').src; })`), 'cleaned up: grey, paper white');
-    assert.ok(await ev(`document.querySelector('#scpages img').naturalWidth <= 1700 && document.querySelector('#scpages img').naturalHeight <= 1700`), 'reduced to at most 1700 px');
-    // remove the second page, add it again, then attach
-    await ev(`document.querySelector('[data-scdel="1"]').click(); true`); await waitFor(`document.querySelectorAll('#scpages figure').length === 1`);
-    await ev(`(async () => { const c = document.createElement('canvas'); c.width = 900; c.height = 1200; const x = c.getContext('2d'); x.fillStyle = '#ccc'; x.fillRect(0, 0, 900, 1200); const b = await new Promise(ok => c.toBlob(ok, 'image/jpeg')); const dt = new DataTransfer(); dt.items.add(new File([b], 'p2.jpg', { type: 'image/jpeg' })); const inp = document.querySelector('#sccam'); inp.files = dt.files; inp.dispatchEvent(new Event('change')); return true; })()`);
-    await waitFor(`document.querySelectorAll('#scpages figure').length === 2 && !document.querySelector('#scok').disabled`, 15000);
-    await ev(`document.querySelector("#scok").click(); true`); await waitFor(`/2 page/.test((document.querySelector('#scaninfo') || {}).textContent || '')`, 15000);
-    // the claim with the scanned receipt
+    await ev(`localStorage.lang = 'en'; true`);
+    const reopen = async () => { await cdp('Page.navigate', { url: 'about:blank' }); await sleep(100); await cdp('Page.navigate', { url: base + 'index.html#myaccount' });
+      await waitFor(`!('serviceWorker' in navigator) || !!navigator.serviceWorker.controller`, 20000); await waitFor(`!!document.querySelector('#nc')`); };
+    // a photo as taken by a phone: dark desk, white paper turned `deg`° with lines of text (or only paper: no desk to find)
+    const photo = (name, w, h, deg, onlyPaper) => `await new Promise(ok => { const c = document.createElement('canvas'); c.width = 1200; c.height = 900; const x = c.getContext('2d');
+      x.fillStyle = ${onlyPaper ? "'#ece6d6'" : "'#383838'"}; x.fillRect(0, 0, 1200, 900); x.translate(600, 450); x.rotate(${deg} * Math.PI / 180);
+      x.fillStyle = '#ece6d6'; x.fillRect(${-w / 2}, ${-h / 2}, ${w}, ${h}); x.fillStyle = '#333'; x.font = '28px sans-serif'; for (let i = 0; i < 14; i++) x.fillText('Line ' + i + ' ...... ' + (i * 9) + '.00', ${-w / 2 + 30}, ${-h / 2 + 60} + i * 44);
+      c.toBlob(b => ok(new File([b], ${JSON.stringify(name)}, { type: 'image/jpeg' })), 'image/jpeg', 0.9); })`;
+    const pick = list => ev(`(async () => { const dt = new DataTransfer(); ${list.map(p => `dt.items.add(${p});`).join(' ')} const inp = document.querySelector('#scpick'); inp.files = dt.files; inp.dispatchEvent(new Event('change')); return true; })()`);
+    // the first page preview: its width / height and the brightness of its four corners (desk left in the picture would be dark)
+    const pageInfo = i => ev(`new Promise(ok => { const im = new Image(); im.onload = () => { const c = document.createElement('canvas'); c.width = im.width; c.height = im.height; const x = c.getContext('2d'); x.drawImage(im, 0, 0);
+      const px = (a, b) => x.getImageData(a, b, 1, 1).data[0]; ok({ w: im.width, h: im.height, corners: [px(3, 3), px(im.width - 4, 3), px(3, im.height - 4), px(im.width - 4, im.height - 4)] }); }; im.src = document.querySelectorAll('#scpages img')[${i}].src; })`);
+
+    // ---- 1. the live scanner: the camera finds the paper and takes the picture by itself; cut out and straightened; no duplicate ----
+    await reopen(); await ev(`document.querySelector('#nc').click(); true`); await waitFor(`!!document.querySelector('#scanrc')`);
+    await ev(`(() => { const g = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices); navigator.mediaDevices.getUserMedia = async c => { const st = await g(c); (window.__streams = window.__streams || []).push(st); return st; }; document.querySelector('#scanrc').click(); return true; })()`);
+    await waitFor(`!!document.querySelector('.scan-live video')`);
+    await waitFor(`document.querySelector('.scan-live video').videoWidth > 0`, 15000);
+    await waitFor(`document.querySelectorAll('#scpages figure').length === 1`, 20000);           // nobody pressed anything
+    let pi = await pageInfo(0), want = CAM.w / CAM.h;
+    assert.ok(Math.abs(pi.w / pi.h - want) < 0.06, `straightened to the paper's shape: ${pi.w}×${pi.h} (${(pi.w / pi.h).toFixed(3)} vs ${want.toFixed(3)})`);
+    assert.ok(pi.corners.every(v => v > 200), 'cut out at the paper: no desk in the corners ' + pi.corners);
+    await sleep(2500); assert.equal(await ev(`document.querySelectorAll('#scpages figure').length`), 1, 'the same page is not taken twice');
+    assert.match(await ev(`document.querySelector('#schint').textContent`), /next page/);
+    await ev(`document.querySelector('#scok').click(); true`); await waitFor(`/1 page/.test((document.querySelector('#scaninfo') || {}).textContent || '') && !document.querySelector('.scan-live')`, 15000);
     await ev(`(() => { const s = (n, v) => { const e = document.querySelector('[name=' + n + ']'); e.value = v; e.dispatchEvent(new Event('input')); }; s('description', 'Site water'); s('amount', '40'); s('date', '2026-11-20'); document.querySelector('#save').click(); return true; })()`);
     await waitFor(`!document.querySelector('#scanrc')`, 15000); await sleep(300);
     const claim = ctx.db.prepare("SELECT * FROM expense_claims WHERE description='Site water'").get(); assert.ok(claim, 'claim saved'); assert.equal(claim.employee_id, emp);
-    const doc = ctx.db.prepare("SELECT * FROM documents WHERE entity='expense_claim' AND entity_id=?").get(claim.id);
-    assert.ok(doc, 'receipt stored'); assert.equal(doc.mime, 'application/pdf'); assert.match(doc.name, /^receipt-\d{8}-\d{4}\.pdf$/);
+    let doc = ctx.db.prepare("SELECT * FROM documents WHERE entity='expense_claim' AND entity_id=?").get(claim.id);
+    assert.ok(doc, 'receipt stored'); assert.equal(doc.mime, 'application/pdf'); assert.match(doc.name, /^receipt-\d{8}-\d{4}\.pdf$/); checkPdf(Buffer.from(doc.data), 1);
+    assert.equal(await ev(`(window.__streams || []).flatMap(s => s.getTracks()).filter(t => t.readyState !== 'ended').length`), 0, 'the camera is switched off after attaching');
+    assert.ok(await ev(`(window.__streams || []).length`) >= 1);
+    console.log('✔ live scanner: the camera found the paper on the desk and took it by itself (no button), cut out and straightened to the paper\'s shape, not taken twice, attached as a 1-page PDF');
+
+    // ---- 2. without a live camera: photos from the phone, each cut out and straightened the same way ----
+    await reopen(); await ev(`document.querySelector('#nc').click(); true`); await waitFor(`!!document.querySelector('#scanrc')`);
+    await ev(`navigator.mediaDevices.getUserMedia = () => Promise.reject(new Error('no camera')); document.querySelector('#scanrc').click(); true`);
+    await waitFor(`!!document.querySelector('#sccam') && !document.querySelector('.scan-live')`);
+    assert.equal(await ev(`document.querySelector('#sccam').getAttribute('capture')`), 'environment', 'the phone\'s back camera');
+    await pick([photo('p1.jpg', 600, 800, 15), photo('p2.jpg', 800, 560, -8)]);
+    await waitFor(`document.querySelectorAll('#scpages figure').length === 2 && !document.querySelector('#scok').disabled`, 20000);
+    pi = await pageInfo(0); assert.ok(Math.abs(pi.w / pi.h - 0.75) < 0.05 && pi.corners.every(v => v > 200), 'photo 1 cut out and straightened ' + JSON.stringify(pi));
+    pi = await pageInfo(1); assert.ok(Math.abs(pi.w / pi.h - 800 / 560) < 0.07 && pi.corners.every(v => v > 200), 'photo 2 (landscape, turned the other way) ' + JSON.stringify(pi));
+    assert.ok(await ev(`document.querySelectorAll('#scpages img')[0].naturalWidth <= 1700`), 'at most 1700 px');
+    // remove page 2; a photo with no desk around the paper: kept whole, the user is told
+    await ev(`document.querySelector('[data-scdel="1"]').click(); true`); await waitFor(`document.querySelectorAll('#scpages figure').length === 1`);
+    await pick([photo('p3.jpg', 1200, 900, 0, true)]); await waitFor(`document.querySelectorAll('#scpages figure').length === 2`, 20000);
+    assert.match(await ev(`document.querySelector('#scmsg').textContent`), /edges were not found/);
+    await ev(`document.querySelector('#scok').click(); true`); await waitFor(`/2 page/.test((document.querySelector('#scaninfo') || {}).textContent || '')`, 15000);
+    await ev(`(() => { const s = (n, v) => { const e = document.querySelector('[name=' + n + ']'); e.value = v; e.dispatchEvent(new Event('input')); }; s('description', 'Fuel'); s('amount', '25'); s('date', '2026-11-21'); document.querySelector('#save').click(); return true; })()`);
+    await waitFor(`!document.querySelector('#scanrc')`, 15000); await sleep(300);
+    const c2 = ctx.db.prepare("SELECT * FROM expense_claims WHERE description='Fuel'").get(); doc = ctx.db.prepare("SELECT * FROM documents WHERE entity='expense_claim' AND entity_id=?").get(c2.id);
     checkPdf(Buffer.from(doc.data), 2); assert.ok(doc.size < 2 * 1024 * 1024, 'small file: ' + doc.size);
-    // "Scan" on a claim already sent (attach later): one more PDF
-    await cdp('Page.navigate', { url: 'about:blank' }); await sleep(100); await cdp('Page.navigate', { url: base + 'index.html#myaccount' });
-    await waitFor(`!!document.querySelector('[data-scan]') || !!document.querySelector('#nc')`);
-    const c2 = (await fetch(base + 'api/me/claims', { method: 'POST', headers: { 'Content-Type': 'application/json', cookie: (await api('POST', 'login', { username: 'worker1', password: 'pass1234' })).c }, body: JSON.stringify({ date: '2026-11-21', description: 'No receipt yet', amount: 15 }) }).then(r => r.json())).id;
-    await cdp('Page.navigate', { url: 'about:blank' }); await sleep(100); await cdp('Page.navigate', { url: base + 'index.html#myaccount' });
-    await waitFor(`!!document.querySelector('[data-scan="${c2}"]')`); await ev(`document.querySelector('[data-scan="${c2}"]').click(); true`); await waitFor(`!!document.querySelector('#scpick')`);
-    await ev(`(async () => { const c = document.createElement('canvas'); c.width = 600; c.height = 800; c.getContext('2d').fillRect(10, 10, 50, 50); const b = await new Promise(ok => c.toBlob(ok, 'image/jpeg')); const dt = new DataTransfer(); dt.items.add(new File([b], 'r.jpg', { type: 'image/jpeg' })); const inp = document.querySelector('#scpick'); inp.files = dt.files; inp.dispatchEvent(new Event('change')); return true; })()`);
-    await waitFor(`!document.querySelector('#scok').disabled`, 15000); await ev(`document.querySelector('#scok').click(); true`);
-    await waitFor(`!!${JSON.stringify(c2)} && !document.querySelector('[data-scan="${c2}"]')`, 15000);
-    const d2 = ctx.db.prepare("SELECT * FROM documents WHERE entity='expense_claim' AND entity_id=?").get(c2); assert.ok(d2); checkPdf(Buffer.from(d2.data), 1);
-    console.log('✔ browser: the claim form scans two pages (cleaned up, reduced, one removed and re-taken) into one PDF stored with the claim; "Scan" on a sent claim attaches one too');
+    console.log('✔ without a live camera: photos cut out and straightened (portrait and landscape, turned either way), a photo with no desk kept whole with a notice, 2-page PDF');
+
+    // ---- 3. "Scan" on a claim already sent: the live scanner attaches one more PDF ----
+    const ck2 = (await api('POST', 'login', { username: 'worker1', password: 'pass1234' })).c;
+    const c3 = (await fetch(base + 'api/me/claims', { method: 'POST', headers: { 'Content-Type': 'application/json', cookie: ck2 }, body: JSON.stringify({ date: '2026-11-21', description: 'No receipt yet', amount: 15 }) }).then(r => r.json())).id;
+    await reopen(); await waitFor(`!!document.querySelector('[data-scan="${c3}"]')`); await ev(`document.querySelector('[data-scan="${c3}"]').click(); true`);
+    await waitFor(`document.querySelectorAll('#scpages figure').length === 1`, 20000); await ev(`document.querySelector('#scok').click(); true`);
+    await waitFor(`!document.querySelector('[data-scan="${c3}"]')`, 15000);
+    const d3 = ctx.db.prepare("SELECT * FROM documents WHERE entity='expense_claim' AND entity_id=?").get(c3); assert.ok(d3); checkPdf(Buffer.from(d3.data), 1);
+    console.log('✔ "Scan" on a sent claim: taken by itself and attached');
     console.log('\nSCAN TESTS PASSED');
   } catch (e) { console.error(e); process.exitCode = 1; }
   finally { try { ws && ws.close(); } catch {} try { proc && proc.kill(); } catch {} server.close(); setTimeout(() => process.exit(process.exitCode || 0), 200); }
