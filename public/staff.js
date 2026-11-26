@@ -33,15 +33,24 @@ async function claimForm({ forEmployee, after, custody }) {
     ${field({ k: 'project_id', ar: 'المشروع', en: 'Project', type: 'select', options: refOpts(projects, p => `${p.code || ''} ${p.name}`) }, '')}
     ${field({ k: 'reference', ar: 'رقم الإيصال / الفاتورة', en: 'Receipt / invoice no.' }, '')}
     ${field({ k: 'paid_from', ar: 'دُفع من', en: 'Paid from', type: 'select', options: [['own', tr('مالي الخاص (أستردّه)', 'My own money (to be paid back)')], ['custody', tr('العهدة النقدية التي بحوزتي', 'The petty cash I hold') + (avail != null ? ` — ${money(avail)}` : '')]] }, custody ? 'custody' : 'own')}
-    <div class="f"><label>${tr('صورة الإيصال (صورة أو PDF)', 'Receipt (photo or PDF)')}</label><input type="file" name="receipt" accept="image/*,application/pdf" capture="environment"></div></div>
+    <div class="f"><label>${tr('الإيصال', 'Receipt')}</label><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><button type="button" class="btn sec" id="scanrc">${ico('camera')} ${tr('مسح بالكاميرا', 'Scan with the camera')}</button>
+      <input type="file" name="receipt" accept="image/*,application/pdf" style="width:auto"></div><span class="muted" id="scaninfo"></span></div></div>
     <div class="acts"><button class="btn" id="save">${tr('إرسال للموافقة', 'Send for approval')}</button><button class="btn sec" id="cancel">${tr('إلغاء', 'Cancel')}</button></div>`, true);
   $('#cancel', m).onclick = closeModal;
+  // the receipt: scanned with the camera (one PDF of all pages) or a file chosen from the phone / computer
+  let scanned = null;
+  $('#scanrc', m).onclick = guard(async () => {
+    const r = await scanDocument(); if (!r) return; scanned = r; m.querySelector('[name=receipt]').value = '';
+    $('#scaninfo', m).innerHTML = `${MK.ok}${tr('مُسح', 'Scanned')}: ${r.pages} ${tr('صفحة', 'page(s)')} (PDF, ${Math.max(1, Math.round(r.bytes / 1024))} KB)`;
+  });
+  m.querySelector('[name=receipt]').onchange = () => { if (m.querySelector('[name=receipt]').files[0]) { scanned = null; $('#scaninfo', m).textContent = ''; } };
   $('#save', m).onclick = guard(async () => {
     const b = {}; for (const k of ['employee_id', 'date', 'description', 'amount', 'vat_amount', 'category', 'project_id', 'reference', 'paid_from']) b[k] = val(m, k);
     const f = m.querySelector('[name=receipt]').files[0];
     if (f && f.size > 8 * 1024 * 1024) throw new Error(tr('الملف أكبر من ٨ ميغابايت', 'The file is larger than 8 MB'));
     const r = await api('POST', forEmployee ? 'expense_claims' : 'me/claims', b);
-    if (f) { const data = await new Promise((ok, no) => { const rd = new FileReader(); rd.onload = () => ok(rd.result); rd.onerror = no; rd.readAsDataURL(f); }); await api('POST', `${forEmployee ? 'expense_claims' : 'me/claims'}/${r.id}/receipt`, { name: f.name, data }); }
+    const rc = scanned ? { name: scanned.name, data: scanned.data } : f ? { name: f.name, data: await new Promise((ok, no) => { const rd = new FileReader(); rd.onload = () => ok(rd.result); rd.onerror = no; rd.readAsDataURL(f); }) } : null;
+    if (rc) await api('POST', `${forEmployee ? 'expense_claims' : 'me/claims'}/${r.id}/receipt`, rc);
     closeModal(); toast(tr('أُرسلت المطالبة للموافقة', 'Claim sent for approval')); after();
   });
 }
@@ -56,14 +65,18 @@ PAGES.myaccount = async () => {
     ${pc.held > 0.005 ? `<p class="muted">${tr('سجّل كل ما تصرفه من العهدة بـ «مطالبة مصروف» ← دُفع من: العهدة، مع صورة الإيصال. يُرجَع الباقي للمحاسب.', 'Record everything you spend from the petty cash as an "Expense claim" → Paid from: the petty cash, with the receipt photo. Return what is left to the accountant.')}</p>` : ''}
     ${pc.requests.length ? `<div class="tw"><table><tbody>${pc.requests.map(r => `<tr><td>${esc(String(r.created || '').slice(0, 10))}</td><td>${esc(r.purpose || '')}${r.decision_note ? `<br><span class="muted">${esc(r.decision_note)}</span>` : ''}</td><td class="n">${money(r.amount)}</td><td><span class="pill">${tr(...(RQ[r.status] || [r.status, r.status]))}</span></td><td>${r.status === 'pending' ? `<button class="btn sec sm" data-wr="${r.id}">${tr('سحب', 'Withdraw')}</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : ''}` : ''}
   <h2>${tr('مطالباتي', 'My expense claims')}</h2><div class="tw"><table><thead><tr><th>${tr('التاريخ', 'Date')}</th><th>${tr('البيان', 'Description')}</th><th class="n">${tr('المبلغ', 'Amount')}</th><th>${tr('الحالة', 'Status')}</th><th>${tr('الإيصال', 'Receipt')}</th><th></th></tr></thead><tbody>
-  ${claims.map(c => `<tr><td>${esc(c.date)}</td><td>${esc(c.description)}${c.project_name ? ` <span class="muted">· ${esc(c.project_name)}</span>` : ''}${c.paid_from === 'custody' ? ` <span class="pill">${tr('من العهدة', 'from petty cash')}</span>` : ''}${c.decision_note ? `<br><span class="muted">${esc(c.decision_note)}</span>` : ''}</td><td class="n">${money(c.total)}</td><td>${clPill(c.status)}</td>
-    <td>${(c.receipts || []).length ? `${ico('clip')} ${c.receipts.length}` : c.status === 'pending' ? `<label class="btn sec sm">${tr('إرفاق', 'Attach')}<input type="file" data-rc="${c.id}" accept="image/*,application/pdf" capture="environment" hidden></label>` : '—'}</td>
+  ${claims.map(c => `<tr><td>${esc(c.date)}</td><td>${esc(c.description)}${c.project_name ? ` <span class="muted">· ${esc(c.project_name)}</span>` : ''}${c.paid_from === 'custody' ? ` <span class="pill">${tr('من العهدة', 'from petty cash')}</span>` : ''}${c.before_handover ? `<br><span class="neg">${MK.warn}${tr('تاريخ الإيصال قبل استلام العهدة', 'Receipt dated before the petty cash was handed over')}</span>` : ''}${c.paid_on && c.paid_on !== c.date ? `<br><span class="muted">${tr('صُرف من العهدة بتاريخ', 'Paid from the petty cash on')} ${esc(c.paid_on)}</span>` : ''}${c.decision_note ? `<br><span class="muted">${esc(c.decision_note)}</span>` : ''}</td><td class="n">${money(c.total)}</td><td>${clPill(c.status)}</td>
+    <td>${(c.receipts || []).length ? `${ico('clip')} ${c.receipts.length}` : c.status === 'pending' ? `<button type="button" class="btn sec sm" data-scan="${c.id}">${ico('camera')} ${tr('مسح', 'Scan')}</button> <label class="btn sec sm">${tr('إرفاق', 'Attach')}<input type="file" data-rc="${c.id}" accept="image/*,application/pdf" hidden></label>` : '—'}</td>
     <td>${c.status === 'pending' ? `<button class="btn sec sm" data-wd="${c.id}">${tr('سحب', 'Withdraw')}</button>` : ''}</td></tr>`).join('') || `<tr><td colspan="6" class="muted">${tr('لا توجد مطالبات', 'No claims')}</td></tr>`}</tbody></table></div>
   <h2 style="margin-top:16px">${tr('كشف حسابي', 'My statement')}</h2>${staffStatementHtml(s)}`);
   $('#nc').onclick = () => claimForm({ forEmployee: false, after: render });
   $('#pr').onclick = () => simpleModal({ title: tr('طلب عهدة نقدية', 'Request petty cash'), table: 'me/petty/requests', after: render, fields: [{ k: 'amount', ar: 'المبلغ', en: 'Amount', type: 'number', req: 1 }, { k: 'purpose', ar: 'لأي غرض؟', en: 'What is it for?', req: 1, full: 1 }] });
   document.querySelectorAll('[data-wr]').forEach(b => b.onclick = guard(async () => { if (confirm(tr('سحب هذا الطلب؟', 'Withdraw this request?'))) { await api('DELETE', 'me/petty/requests/' + b.dataset.wr); render(); } }));
   document.querySelectorAll('[data-wd]').forEach(b => b.onclick = guard(async () => { if (confirm(tr('سحب هذه المطالبة؟', 'Withdraw this claim?'))) { await api('DELETE', 'me/claims/' + b.dataset.wd); render(); } }));
+  document.querySelectorAll('[data-scan]').forEach(b => b.onclick = guard(async () => {
+    const r = await scanDocument(); if (!r) return;
+    await api('POST', `me/claims/${b.dataset.scan}/receipt`, { name: r.name, data: r.data }); toast(tr('أُرفق الإيصال', 'Receipt attached')); render();
+  }));
   document.querySelectorAll('[data-rc]').forEach(inp => inp.onchange = guard(async () => {
     const f = inp.files[0]; if (!f) return; const data = await new Promise((ok, no) => { const rd = new FileReader(); rd.onload = () => ok(rd.result); rd.onerror = no; rd.readAsDataURL(f); });
     await api('POST', `me/claims/${inp.dataset.rc}/receipt`, { name: f.name, data }); toast(tr('أُرفق الإيصال', 'Receipt attached')); render();
@@ -79,7 +92,7 @@ PAGES.claims = async () => {
     <button class="btn" id="nc">+ ${tr('مطالبة لموظف', 'Claim for an employee')}</button>${fin ? `<button class="btn" id="rb">${tr('صرف للموظف', 'Reimburse an employee')}</button>` : ''}${ME.role === 'admin' ? `<button class="btn sec" id="lim">${tr('حد موافقة المحاسب', 'Accountant\'s limit')}</button>` : ''}</div>
   <p class="muted">${tr('المدير والمسؤول يوافقان على أي مبلغ؛ المحاسب حتى', 'The manager and the administrator approve any amount; the accountant up to')} <b>${d.accountant_limit ? money(d.accountant_limit) : tr('(لم يُحدَّد)', '(not set)')}</b>. ${tr('لا أحد يوافق على مطالبته.', 'Nobody approves their own claim.')}</p>
   <div class="tw"><table><thead><tr><th>${tr('التاريخ', 'Date')}</th><th>${tr('الموظف', 'Employee')}</th><th>${tr('البيان', 'Description')}</th><th class="n">${tr('المبلغ', 'Amount')}</th><th>${tr('الإيصال', 'Receipt')}</th><th>${tr('الحالة', 'Status')}</th><th></th></tr></thead><tbody>
-  ${d.rows.map(c => `<tr><td>${esc(c.date)}</td><td>${esc(c.employee_name)}</td><td>${esc(c.description)}${c.project_name ? ` <span class="muted">· ${esc(c.project_name)}</span>` : ''}${c.reference ? ` <span class="muted">· ${esc(c.reference)}</span>` : ''}${c.paid_from === 'custody' ? ` <span class="pill">${tr('من العهدة', 'from petty cash')}</span>` : ''}${c.decision_note ? `<br><span class="muted">${esc(c.decided_by || '')}: ${esc(c.decision_note)}</span>` : ''}</td>
+  ${d.rows.map(c => `<tr><td>${esc(c.date)}</td><td>${esc(c.employee_name)}</td><td>${esc(c.description)}${c.project_name ? ` <span class="muted">· ${esc(c.project_name)}</span>` : ''}${c.reference ? ` <span class="muted">· ${esc(c.reference)}</span>` : ''}${c.paid_from === 'custody' ? ` <span class="pill">${tr('من العهدة', 'from petty cash')}</span>` : ''}${c.before_handover ? `<br><span class="neg">${MK.warn}${tr('تاريخ الإيصال قبل استلام العهدة', 'Receipt dated before the petty cash was handed over')}</span>` : ''}${c.paid_on && c.paid_on !== c.date ? `<br><span class="muted">${tr('صُرف من العهدة بتاريخ', 'Paid from the petty cash on')} ${esc(c.paid_on)}</span>` : ''}${c.decision_note ? `<br><span class="muted">${esc(c.decided_by || '')}: ${esc(c.decision_note)}</span>` : ''}</td>
     <td class="n">${money(c.total)}${c.vat_amount ? `<br><span class="muted">${tr('ضريبة', 'VAT')} ${money(c.vat_amount)}</span>` : ''}</td><td>${receiptsCell(c)}</td><td>${clPill(c.status)}</td>
     <td>${c.can_decide ? `<button class="btn sm" data-ok="${c.id}">${tr('موافقة', 'Approve')}</button> <button class="btn sec sm" data-no="${c.id}">${tr('رفض', 'Reject')}</button>` : c.block ? `<span class="muted" title="${esc(c.block)}">${ico('lock')}</span>` : ''}
       ${c.status === 'approved' && ME.role === 'admin' ? `<button class="btn sec sm" data-undo="${c.id}">${tr('إلغاء الموافقة', 'Take back')}</button>` : ''}${c.status !== 'approved' && fin ? `<button class="btn sec sm" data-del="${c.id}">×</button>` : ''}</td></tr>`).join('') || `<tr><td colspan="7" class="muted">—</td></tr>`}</tbody></table></div>`);
@@ -90,7 +103,16 @@ PAGES.claims = async () => {
   document.querySelectorAll('[data-pno]').forEach(b => b.onclick = guard(async () => { const note = prompt(tr('سبب الرفض:', 'Reason for the rejection:')); if (!note) return; await api('POST', `petty_requests/${b.dataset.pno}/decide`, { status: 'rejected', note }); render(); }));
   $('#st').onchange = e => { sessionStorage.clSt = e.target.value; render(); };
   $('#nc').onclick = () => claimForm({ forEmployee: true, after: render });
-  document.querySelectorAll('[data-ok]').forEach(b => b.onclick = guard(async () => { await api('POST', `expense_claims/${b.dataset.ok}/decide`, { status: 'approved', note: '' }); toast(tr('تمت الموافقة', 'Approved')); render(); }));
+  document.querySelectorAll('[data-ok]').forEach(b => b.onclick = guard(async () => {
+    const go = settle_later => api('POST', `expense_claims/${b.dataset.ok}/decide`, { status: 'approved', note: '', settle_later });
+    try { await go(false); } catch (x) {
+      // a receipt dated before the employee held the petty cash: approve with the receipt's date, paid from the petty cash on the day proposed
+      if (!(x.data && x.data.code === 'before_handover')) throw x;
+      if (!confirm(tr(`تاريخ الإيصال قبل استلام الموظف للعهدة.\nعند الموافقة: يُسجَّل المصروف بتاريخ الإيصال، ويُخصم من العهدة بتاريخ ${x.data.settle_date}.`, `The receipt is dated before the employee held the petty cash.\nIf approved: the expense keeps the receipt's date and is paid from the petty cash on ${x.data.settle_date}.`))) return;
+      await go(true);
+    }
+    toast(tr('تمت الموافقة', 'Approved')); render();
+  }));
   document.querySelectorAll('[data-no]').forEach(b => b.onclick = guard(async () => { const note = prompt(tr('سبب الرفض:', 'Reason for the rejection:')); if (!note) return; await api('POST', `expense_claims/${b.dataset.no}/decide`, { status: 'rejected', note }); render(); }));
   document.querySelectorAll('[data-undo]').forEach(b => b.onclick = guard(async () => { if (confirm(tr('إلغاء الموافقة؟ يُحذف المصروف من المشروع وتعود المطالبة بانتظار الموافقة.', 'Take the approval back? The expense is removed from the project and the claim is pending again.'))) { await api('POST', `expense_claims/${b.dataset.undo}/undo`); render(); } }));
   document.querySelectorAll('[data-del]').forEach(b => b.onclick = guard(async () => { if (confirmDel()) { await api('DELETE', 'expense_claims/' + b.dataset.del); render(); } }));
