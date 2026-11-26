@@ -132,9 +132,15 @@ server.listen(0, async () => {
     const u = (await api('POST', 'users', { username: 'worker1', password: 'pass1234', role: 'viewer' }, ck)).j.id; assert.equal((await api('PUT', 'users/' + u, { employee_id: emp }, ck)).s, 200);
     await launch(); await cdp('Page.enable'); await cdp('Runtime.enable');
     await cdp('Page.navigate', { url: base + 'index.html' }); await waitFor('document.readyState === "complete"');
+    // the service worker reloads the page once when it first takes control (mobile.js): let that happen before the test starts
+    // (as in test-ui-shell.js); otherwise a step can land in the middle of that reload ("Inspected target navigated or closed")
+    await waitFor(`'serviceWorker' in navigator ? navigator.serviceWorker.ready.then(() => true) : true`, 20000);
+    await waitFor(`!('serviceWorker' in navigator) || !!navigator.serviceWorker.controller`, 20000);
+    await sleep(500); await waitFor('document.readyState === "complete"');
     assert.equal(await ev(`fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'worker1', password: 'pass1234' }) }).then(r => r.status)`), 200);
     await ev(`localStorage.lang = 'en'; true`);
-    const reopen = async () => { await cdp('Page.navigate', { url: 'about:blank' }); await sleep(100); await cdp('Page.navigate', { url: base + 'index.html#myaccount' }); await waitFor(`!!document.querySelector('#nc')`); };
+    const reopen = async () => { await cdp('Page.navigate', { url: 'about:blank' }); await sleep(100); await cdp('Page.navigate', { url: base + 'index.html#myaccount' });
+      await waitFor(`!('serviceWorker' in navigator) || !!navigator.serviceWorker.controller`, 20000); await waitFor(`!!document.querySelector('#nc')`); };
     // a photo as taken by a phone: dark desk, white paper turned `deg`° with lines of text (or only paper: no desk to find)
     const photo = (name, w, h, deg, onlyPaper) => `await new Promise(ok => { const c = document.createElement('canvas'); c.width = 1200; c.height = 900; const x = c.getContext('2d');
       x.fillStyle = ${onlyPaper ? "'#ece6d6'" : "'#383838'"}; x.fillRect(0, 0, 1200, 900); x.translate(600, 450); x.rotate(${deg} * Math.PI / 180);
