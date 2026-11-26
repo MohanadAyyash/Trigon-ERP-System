@@ -64,7 +64,9 @@ module.exports = ctx => {
   const claimView = c => {
     const e = emp(c.employee_id), pr = c.project_id ? db.prepare('SELECT name, code FROM projects WHERE id=?').get(c.project_id) : null;
     const receipts = db.prepare("SELECT id, name, mime, size, created FROM documents WHERE entity='expense_claim' AND entity_id=? ORDER BY id").all(c.id);
-    return { ...c, total: total(c), employee_name: e ? e.name : '', project_name: pr ? pr.name : '', receipts };
+    const paid_on = c.payment_id ? db.prepare('SELECT date FROM payments WHERE id=?').get(c.payment_id)?.date || null : null;
+    const before_handover = c.status === 'pending' && c.paid_from === 'custody' && ctx.custodyLowest ? !!ctx.custodyLowest(c.employee_id, { spend: { date: c.date, amount: total(c) } }).at : false;
+    return { ...c, total: total(c), employee_name: e ? e.name : '', project_name: pr ? pr.name : '', receipts, paid_on, before_handover };
   };
   function checkClaim(x, employeeId) {
     if (!emp(employeeId)) bad('Select the employee');
@@ -103,6 +105,11 @@ module.exports = ctx => {
     audit(req, 'upload', 'documents', Number(r.lastInsertRowid), `expense_claim ${c.id}: ${name}`);
     return Number(r.lastInsertRowid);
   }
+  // the first day from `from` (the receipt) to today when the employee's petty cash covers `amount` without going below zero on any day
+  const settleDate = (eid, from, amount) => {
+    const days = [from, ...ctx.custodyMoves(eid).filter(m => m.kind === 'handover' && m.date > from).map(m => m.date), today()].filter(d => d >= from && d <= today());
+    return [...new Set(days)].sort().find(d => !ctx.custodyLowest(eid, { spend: { date: d, amount } }).at) || null;
+  };
   function decide(c, me, x, req) {
     if (c.status !== 'pending') bad('This claim was already decided');
     if (!['approved', 'rejected'].includes(x.status)) bad('Decision must be approved or rejected');
@@ -116,10 +123,22 @@ module.exports = ctx => {
       const custody = c.paid_from === 'custody';                     // paid from petty cash the employee holds: credit 1030, not owed to him
       if (custody && ctx.need1030) ctx.need1030();
       if (custody && total(c) > (ctx.custodyHeld ? ctx.custodyHeld(c.employee_id) : 0) + 0.005) bad(`${emp(c.employee_id).name} holds only ${ctx.custodyHeld ? ctx.custodyHeld(c.employee_id) : 0} of petty cash`);
-      if (custody && ctx.custodyLowest) { const lo = ctx.custodyLowest(c.employee_id, { spend: { date: c.date, amount: total(c) } }); if (lo.at) bad(`${emp(c.employee_id).name} did not hold enough petty cash on ${lo.at} for an expense dated ${c.date} — check the date`); }
+      // a receipt dated before the employee held the petty cash (e.g. paid just before the hand-over): with the approver's confirmation the
+      // expense keeps the receipt's date (cost and input VAT in that period) and the petty cash pays it on the first day it covers it
+      // (that day's balance and every later day stay at zero or above). Without the confirmation it is refused, with that day proposed.
+      let payDate = c.date;
+      if (custody && ctx.custodyLowest) {
+        const lo = ctx.custodyLowest(c.employee_id, { spend: { date: c.date, amount: total(c) } });
+        if (lo.at) {
+          const d = settleDate(c.employee_id, c.date, total(c));
+          if (!d) bad(`${emp(c.employee_id).name} did not hold enough petty cash on ${lo.at} for an expense dated ${c.date} — check the date`);
+          if (x.settle_later !== true) throw Object.assign(new Error(`${emp(c.employee_id).name} did not hold enough petty cash on ${lo.at} for an expense dated ${c.date}. Approve it with the receipt's date, paid from the petty cash on ${d}?`), { status: 409, code: 'before_handover', settle_date: d });
+          guardDate(d, 'a petty cash payment'); payDate = d;
+        }
+      }
       const bill = db.prepare('INSERT INTO bills(date,party_id,project_id,category,description,amount,vat_amount,reference) VALUES(?,?,?,?,?,?,?,?)').run(c.date, c.party_id, c.project_id, c.category, `${c.description} (${custody ? 'petty cash of' : 'claim of'} ${emp(c.employee_id).name})`, c.amount, c.vat_amount, c.reference || `CLAIM-${c.id}`);
       const billId = Number(bill.lastInsertRowid);
-      const pay = db.prepare(`INSERT INTO payments(kind,date,amount,method,reference,bill_id,employee_id,notes) VALUES('out',?,?,'${custody ? 'petty' : 'employee'}',?,?,?,'expense-claim')`).run(c.date, total(c), `CLAIM-${c.id}`, billId, c.employee_id);
+      const pay = db.prepare(`INSERT INTO payments(kind,date,amount,method,reference,bill_id,employee_id,notes) VALUES('out',?,?,'${custody ? 'petty' : 'employee'}',?,?,?,'expense-claim')`).run(payDate, total(c), `CLAIM-${c.id}`, billId, c.employee_id);
       db.prepare("UPDATE expense_claims SET status='approved', decided_by=?, decided_by_id=?, decided_at=?, decision_note=?, bill_id=?, payment_id=? WHERE id=?").run(me.username, me.id, now(), String(x.note || '').trim(), billId, Number(pay.lastInsertRowid), c.id);
     }
     audit(req, x.status, 'expense_claims', c.id, `${total(c)}`);
@@ -290,7 +309,11 @@ module.exports = ctx => {
         }
         const cl = b && /^\d+$/.test(b) && claim(b); if (!cl) return send(res, 404, { error: 'not found' }), true;
         if (m === 'GET' && !c) return send(res, 200, claimView(cl)), true;
-        if (m === 'POST' && c === 'decide') { const x = await readBody(req); ctx.tx(() => decide(cl, me, x, req)); return send(res, 200, claimView(claim(cl.id))), true; }
+        if (m === 'POST' && c === 'decide') {
+          const x = await readBody(req);
+          try { ctx.tx(() => decide(cl, me, x, req)); } catch (e) { if (e.code === 'before_handover') return send(res, 409, { error: e.message, code: e.code, settle_date: e.settle_date }), true; throw e; }
+          return send(res, 200, claimView(claim(cl.id))), true;
+        }
         if (m === 'POST' && c === 'receipt') { const x = await readBody(req, 12e6); return send(res, 200, { id: saveReceipt(cl, x, me, req) }), true; }
         if (m === 'POST' && c === 'undo') {                            // take back an approval: the bill and its payment go, the claim is pending again
           if (me.role !== 'admin') refuse('Only the administrator can take back an approval');

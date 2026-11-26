@@ -2108,7 +2108,11 @@ Positive amounts are **in the partner's favour**; amounts in brackets are **owed
 
 An **expense claim** = an employee paid a company expense from own money (fuel, small items, fees…) and asks for it back.
 
-**The employee submits the claim:** menu **My account & claims** → **+ Expense claim**: date, what was paid for, amount, VAT (if on the invoice), category, project, receipt number, and a **photo of the receipt** (straight from the phone camera) → **Send for approval**.
+**The employee submits the claim:** menu **My account & claims** → **+ Expense claim**: date, what was paid for, amount, VAT (if on the invoice), category, project, receipt number, and the receipt → **Send for approval**.
+- **Scan with the camera** (on a phone) opens the camera straight away. Photograph the receipt page by page; **Photograph the next page** adds a page, and **×** removes one.
+- Each page is cleaned up like a scanner would: white paper, black text, and shadows evened out. Untick **Clean up as a document** to keep the photo as it is.
+- **Attach the PDF** joins all pages into one PDF attached to the claim. You can also pick photos from the phone (**From photos**) or attach an existing file (photo or PDF).
+- A claim sent without a receipt shows **Scan** and **Attach** in **My expense claims** while it waits for approval.
 - The menu shows for every user linked to an employee record. An employee account is always linked; other staff accounts (engineer, manager…) are linked by the administrator: Settings → Users → **Employee**.
 - A receipt can be attached later, and the claim withdrawn, while it is pending.
 
@@ -2142,6 +2146,9 @@ Every employee who carries petty cash has a balance in their own name, separate 
 2. **Approval:** **Expense claims** → "Petty cash requests waiting for approval". Same rule: manager and administrator any amount, accountant up to the limit, nobody their own request.
 3. **Hand-over:** the accountant → **Petty cash** → "Approved requests to hand over" → **Hand over**: date, cash or bank → **Save** → print the **acknowledgement** for the employee to sign (English and Arabic). Only the administrator can hand over directly without a request.
 4. **Spending:** the employee records each expense as an **Expense claim** → **Paid from: the petty cash I hold**, with the receipt photo. Once approved it is booked on the project and taken off the employee's petty cash. More than what is available cannot be recorded.
+   - **A receipt dated before the petty cash was handed over** (for example, paid the day before the hand-over) is flagged to the approver: "Receipt dated before the petty cash was handed over". **Approve** asks for a confirmation and shows the payment date.
+   - Once confirmed, the expense keeps the receipt's date, so it stays in its period with its input VAT in the right quarter. It is paid from the petty cash on the first day the petty cash covers it (usually the hand-over day).
+   - The petty cash never goes below zero on any day, and the approval rules are unchanged.
 5. **Return:** **Receive what is left**: employee, amount, cash or bank. Amounts in expenses waiting for approval cannot be received back: approve or reject them first.
 
 **The employee statement** shows "Petty cash held" in brackets (owed by the employee until spent with receipts or returned). It must be zero when the employee leaves.

@@ -154,6 +154,44 @@ server.listen(0, async () => {
     // a backdated expense from petty cash: the employee held nothing on that date
     const old = await as('fore1', async () => ok(await call('POST', 'me/claims', { date: '2026-08-20', description: 'Old receipt', amount: 10, project_id: prj, paid_from: 'custody' })).id);
     await as('mgr', async () => { no(await call('POST', `expense_claims/${old}/decide`, { status: 'approved' }), /did not hold enough petty cash on 2026-08-20/); ok(await call('POST', `expense_claims/${old}/decide`, { status: 'rejected', note: 'wrong date' })); });
+    // a receipt dated before the hand-over (paid just before the employee got the petty cash): refused unless the approver confirms; then
+    // the expense keeps the receipt's date (cost and input VAT in its period) and the petty cash pays it on the first day it covers it
+    const early = await as('fore1', async () => ok(await call('POST', 'me/claims', { date: '2026-08-25', description: 'Receipt before the hand-over', amount: 20, vat_amount: 1, project_id: prj, paid_from: 'custody', reference: 'R-778' })).id);
+    assert.equal(ok(await call('GET', `expense_claims/${early}`)).before_handover, true, 'flagged for the approver');
+    const heldBefore = await held(E1);
+    await as('mgr', async () => {
+      const r = await call('POST', `expense_claims/${early}/decide`, { status: 'approved' });
+      assert.equal(r.s, 409, JSON.stringify(r.j)); assert.equal(r.j.code, 'before_handover'); assert.match(r.j.error, /did not hold enough petty cash on 2026-08-25/);
+      assert.ok(r.j.settle_date > '2026-08-25' && r.j.settle_date <= new Date().toISOString().slice(0, 10), 'a later day is proposed: ' + r.j.settle_date);
+      assert.equal(ok(await call('GET', `expense_claims/${early}`)).status, 'pending', 'nothing approved without the confirmation');
+      const v = ok(await call('POST', `expense_claims/${early}/decide`, { status: 'approved', settle_later: true }));
+      assert.equal(v.status, 'approved'); assert.equal(v.paid_on, r.j.settle_date, 'paid from the petty cash on the proposed day');
+      const bill = ctx.db.prepare('SELECT * FROM bills WHERE id=?').get(v.bill_id), pay = ctx.db.prepare('SELECT * FROM payments WHERE id=?').get(v.payment_id);
+      assert.equal(bill.date, '2026-08-25', 'the expense keeps the receipt date'); assert.equal(bill.vat_amount, 1); assert.equal(bill.amount, 20);
+      assert.deepEqual([pay.date, pay.method, pay.amount, pay.employee_id], [r.j.settle_date, 'petty', 21, E1]);
+    });
+    assert.equal(await held(E1), Math.round((heldBefore - 21) * 100) / 100, 'the petty cash held goes down by the receipt');
+    assert.equal(ctx.custodyLowest(E1).at, null, 'the petty cash never below zero on any day');
+    { const st = ok(await call('GET', `staff_statements/${E1}`)); const mv = JSON.stringify(st); assert.ok(mv.includes('Receipt before the hand-over'), 'on the employee statement'); }
+    // the approval rules are unchanged (the employee cannot approve their own receipt; a confirmation does not bypass anything)
+    const early2 = await as('fore1', async () => ok(await call('POST', 'me/claims', { date: '2026-08-26', description: 'Second early receipt', amount: 5, project_id: prj, paid_from: 'custody' })).id);
+    await as('fore1', async () => assert.equal((await call('POST', `expense_claims/${early2}/decide`, { status: 'approved', settle_later: true })).s, 403, 'not by the employee'));
+    await as('mgr', async () => ok(await call('POST', `expense_claims/${early2}/decide`, { status: 'rejected', note: 'duplicate' })));
+    // taking back the approval removes both postings
+    ok(await call('POST', `expense_claims/${early}/undo`)); assert.equal(await held(E1), heldBefore); assert.equal(ok(await call('GET', `expense_claims/${early}`)).status, 'pending');
+    await as('mgr', async () => ok(await call('POST', `expense_claims/${early}/decide`, { status: 'rejected', note: 'test done' })));
+    // exactly the first day the petty cash covers it: one hand-over on 2026-10-10, a receipt of 2026-10-05 → paid on 2026-10-10
+    {
+      const E9 = ok(await call('POST', 'employees', { name: 'Storekeeper Nine', join_date: '2026-01-01', basic: 2000, project_id: prj, ...WPS })).id;
+      ok(await call('POST', 'petty_custody/handover', { employee_id: E9, date: '2026-10-10', amount: 100, method: 'cash' }));
+      const c9 = ok(await call('POST', 'expense_claims', { employee_id: E9, date: '2026-10-05', description: 'Bought before the hand-over', amount: 30, project_id: prj, paid_from: 'custody' })).id;
+      await as('mgr', async () => {
+        const r = await call('POST', `expense_claims/${c9}/decide`, { status: 'approved' }); assert.equal(r.s, 409); assert.equal(r.j.settle_date, '2026-10-10', 'the hand-over day, not today');
+        const v = ok(await call('POST', `expense_claims/${c9}/decide`, { status: 'approved', settle_later: true })); assert.equal(v.paid_on, '2026-10-10');
+        assert.equal(ctx.db.prepare('SELECT date FROM bills WHERE id=?').get(v.bill_id).date, '2026-10-05');
+      });
+      assert.equal(await held(E9), 70);
+    }
     // a backdated return the same
     await as('acc', async () => no(await call('POST', 'petty_custody/return', { employee_id: E1, date: '2026-09-01', amount: 10, method: 'cash' }), /did not hold that much petty cash on 2026-09-01/));
     // deleting an old hand-over that later expenses were paid from, even when a newer hand-over covers today's balance
