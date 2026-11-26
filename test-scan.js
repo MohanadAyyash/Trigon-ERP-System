@@ -64,7 +64,7 @@ let proc, ws, seq = 0; const pending = new Map();
 async function launch() {
   const prof = fs.mkdtempSync(path.join(os.tmpdir(), 'erp-scan-chrome-'));
   proc = spawn(exe, ['--headless=new', '--no-sandbox', '--disable-gpu', '--no-first-run', '--remote-debugging-port=0', `--user-data-dir=${prof}`, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
-  const wsUrl = await new Promise((res, rej) => { let buf = ''; const t = setTimeout(() => rej(new Error('browser did not start')), 20000);
+  const wsUrl = await new Promise((res, rej) => { let buf = ''; const t = setTimeout(() => rej(new Error('browser did not start')), 60000);   // a slow CI machine can need more than 20 s
     proc.stderr.on('data', d => { buf += d; const m = /DevTools listening on (ws:\/\/\S+)/.exec(buf); if (m) { clearTimeout(t); res(m[1]); } }); });
   const port = new URL(wsUrl).port; let page;
   for (let i = 0; i < 50 && !page; i++) { page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(t => t.type === 'page'); if (!page) await sleep(100); }

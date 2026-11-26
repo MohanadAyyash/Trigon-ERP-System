@@ -440,6 +440,15 @@ const mailCfgFor = () => {
 };
 const ctx = { tx, postOnce, brandRef, vatReport: (...a) => vatReport(...a), db, send, bad, audit, readBody, getSettings, enrich, today, round, C, nextNumber, parseItems, TABLES, ROLES, can, DATA_DIR, inCash, countable, sessionUser, projectRows, payrollRows, applyPayroll, mailCfg: mailCfgFor, sendMail, validEmail, docHtml, toText, hooks: {} };
 ctx.siteScope = me => siteScope(me);
+// Nobody approves a request of their own (expense claims, petty cash requests, leave, employee requests, spend approvals) — except the ONE
+// person named on the server: SELF_APPROVER_USERNAME in .env (e.g. the owner). A server setting, not an app setting, so no other
+// administrator can name themselves. One username only (spaces / case ignored); a list, an unknown or a disabled user = nobody. It only
+// lifts the "own request" rule: the role still needs the right to approve. Every self-approval is audited as 'self-approve'.
+ctx.selfApprover = me => {
+  const n = String(process.env.SELF_APPROVER_USERNAME || '').trim().toLowerCase();
+  if (!n || !me || String(me.username || '').toLowerCase() !== n) return false;          // exact match: a list never matches a username
+  return !!db.prepare('SELECT 1 FROM users WHERE id=? AND COALESCE(disabled,0)=0').get(me.id);
+};
 ctx.isHttps = isHttps;
 ctx.createSession = createSession; CTX = ctx; ctx.sessionTtl = sessionTtl;                                             // Microsoft sign-in (Phase 1B) starts exactly the same session as the password login
 ctx.sessionCookie = (req, token, maxAge = 2592000) => cookie(req, token, maxAge);

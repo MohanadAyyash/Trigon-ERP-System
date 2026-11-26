@@ -86,7 +86,8 @@ module.exports = ctx => {
       const po = r.kind === 'po' ? poById[r.ref_id] : null, bill = r.kind === 'payment' ? bills[r.ref_id] : null;
       return { ...r, label: po ? `${po.number} — ${po.supplier_name || ''}` : bill ? `${bill.party_name || 'Expense'} — ${bill.description || bill.reference || '#' + bill.id}` : `#${r.ref_id}`,
         project_name: (po || bill || {}).project_name || '', doc_total: po ? po.total : bill ? bill.total : null, balance: bill ? bill.balance : null,
-        stale: !!po && r.status !== 'rejected' && Math.abs(po.total - r.amount) > 0.011 };   // the order changed after the request
+        stale: !!po && r.status !== 'rejected' && Math.abs(po.total - r.amount) > 0.011,   // the order changed after the request
+        own: !!r.requested_by_id && +r.requested_by_id === +me.id && !ctx.selfApprover(me) };   // own request: another administrator decides
     });
     // what still needs a request: purchase orders above the limit with no live request; open bills above the limit not fully approved
     const need_po = lp ? pos.filter(p => p.status !== 'closed' && !p.bill_id && poState(p) === 'required').map(p => ({ id: p.id, number: p.number, supplier_name: p.supplier_name, project_name: p.project_name, total: p.total, status: p.status })) : [];
@@ -124,10 +125,13 @@ module.exports = ctx => {
       if (m === 'PUT' && b) {                                                // decide (administrator)
         if (me.role !== 'admin') return send(res, 403, { error: 'only the administrator decides spend approvals' }), true;
         const r = db.prepare('SELECT * FROM spend_approvals WHERE id=?').get(+b); if (!r) return send(res, 404, { error: 'not found' }), true;
+        const own = !!r.requested_by_id && +r.requested_by_id === +me.id;
+        if (own && !ctx.selfApprover(me)) return send(res, 403, { error: 'Nobody can approve a request of their own — another administrator decides it' }), true;   // except the one person named on the server
         const x = await readBody(req); if (!['approved', 'rejected'].includes(x.status)) bad('Decision must be approved or rejected'); if (r.status !== 'pending') bad('This request was already decided');
         if (r.kind === 'po' && x.status === 'approved') { const po = poRow(r.ref_id); if (!po) bad('The purchase order no longer exists'); if (Math.abs(po.total - r.amount) > 0.011) bad(`The purchase order changed after the request (now ${money(po.total)}) — ask for approval again`); }
         db.prepare('UPDATE spend_approvals SET status=?, decided_by=?, decided_at=?, decision_note=? WHERE id=?').run(x.status, me.username, now(), String(x.note || '').slice(0, 500), r.id);
         audit(req, x.status === 'approved' ? 'approve' : 'reject', 'spend_approvals', r.id, `${r.kind} #${r.ref_id} ${money(r.amount)}`);
+        if (own) audit(req, 'self-approve', 'spend_approvals', r.id, `${x.status} own ${r.kind} #${r.ref_id} ${money(r.amount)} (SELF_APPROVER_USERNAME)`);
         if (ctx.hooks.onSpendDecision) try { ctx.hooks.onSpendDecision({ ...r, status: x.status, decided_by: me.username }); } catch { /* notifications never block the decision */ }
         if (r.requested_by_id) notify(r.requested_by_id, x.status === 'approved' ? 'تم اعتماد طلب الصرف / Spend request approved' : 'تم رفض طلب الصرف / Spend request rejected', `${money(r.amount)}${x.note ? ' — ' + x.note : ''}`);
         return send(res, 200, { ok: 1 }), true;

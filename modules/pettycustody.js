@@ -169,6 +169,7 @@ module.exports = ctx => {
           if (x.status === 'rejected' && !String(x.note || '').trim()) bad('Write the reason for the rejection');
           db.prepare('UPDATE petty_requests SET status=?, decided_by=?, decided_by_id=?, decided_at=?, decision_note=? WHERE id=?').run(x.status, me.username, me.id, now(), String(x.note || '').trim(), r.id);
           audit(req, x.status, 'petty_requests', r.id, `${r.amount}`);
+          if (me.employee_id && +me.employee_id === +r.employee_id) audit(req, 'self-approve', 'petty_requests', r.id, `${x.status} own petty cash request ${r.amount} (SELF_APPROVER_USERNAME)`);
           ping(db.prepare('SELECT id FROM users WHERE employee_id=?').all(r.employee_id).map(u => u.id), x.status === 'approved' ? 'تمت الموافقة على طلب العهدة / Petty cash request approved' : 'رُفض طلب العهدة / Petty cash request rejected', `${money(r.amount)} AED${x.note ? ' — ' + x.note : ''}`, '#myaccount');
           if (x.status === 'approved') ping(db.prepare("SELECT id FROM users WHERE COALESCE(disabled,0)=0 AND role IN ('admin','accountant')").all().map(u => u.id).filter(i => i !== me.id), 'عهدة معتمدة بانتظار التسليم / Approved petty cash to hand over', `${emp(r.employee_id)?.name || ''} — ${money(r.amount)} AED`, '#petty');
           return send(res, 200, reqView(db.prepare('SELECT * FROM petty_requests WHERE id=?').get(r.id))), true;
