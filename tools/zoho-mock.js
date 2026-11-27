@@ -17,6 +17,8 @@ function mockZoho() {
       { account_id: '3201', account_name: 'Accounts Receivable', account_type: 'accounts_receivable' }, { account_id: '3202', account_name: 'Retention Receivable', account_type: 'other_current_asset' }] };
   const calls = [], api = { domain: '' };
   const KEY = { journals: ['journal', 'journal_id'], invoices: ['invoice', 'invoice_id', 'invoice_number'], creditnotes: ['creditnote', 'creditnote_id', 'creditnote_number'], bills: ['bill', 'bill_id', 'bill_number'], expenses: ['expense', 'expense_id'], contacts: ['contact', 'contact_id'], customerpayments: ['payment', 'payment_id'], vendorpayments: ['vendorpayment', 'payment_id'] };
+  // like the real Zoho Books (UAE): while VAT is not set up in the organisation (no taxes), a contact's VAT fields are refused
+  const vatFields = body => { if (!T.taxes.length) for (const k of ['tax_treatment', 'tax_reg_no']) if (body[k] !== undefined) throw err(400, 2, `Invalid Element ${k}`); };
   const total = d => Math.round((d.line_items || []).reduce((s, l) => { const t = T.taxes.find(x => x.tax_id === l.tax_id); return s + l.quantity * l.rate * (1 + (t ? t.tax_percentage : 0) / 100); }, 0) * 100) / 100;
   const err = (status, code, message) => Object.assign(new Error(message), { status, code });
   const state = { down: false, failPost: 0, failDelete: 0, failNth: 0, lostPost: 0, failPath: '', tamperJournal: 0, tamperAccount: '' };   // tamper*: Zoho stores something else than it was sent                                                     // outage: every Books request answers 503
@@ -112,6 +114,7 @@ function mockZoho() {
       if (p[0] === 'bills' && (!body.vendor_id || body.line_items.some(l => !l.account_id))) throw err(400, 2, 'vendor and account required');
       if (p[0] === 'expenses' && (!body.account_id || !body.paid_through_account_id)) throw err(400, 2, 'account required');
       if (p[0] === 'contacts' && tb.some(r => r.contact_name === body.contact_name)) throw err(400, 3062, 'Contact name already exists');
+      if (p[0] === 'contacts') vatFields(body);
       const r = { [idf]: id(), ...body, status: p[0] === 'contacts' ? 'active' : p[0] === 'expenses' ? 'nonbillable' : 'draft' };
       if (p[0] === 'journals') { if (state.tamperJournal > 0) { state.tamperJournal--; r.line_items = r.line_items.map(l => ({ ...l, amount: Math.round((l.amount + 1) * 100) / 100 })); } tb.push(r); return { journal: r }; }
       if (p[0] === 'contacts') r.contact_persons = (body.contact_persons || []).map(cp => ({ contact_person_id: id(), ...cp }));
@@ -119,6 +122,7 @@ function mockZoho() {
       tb.push(r); return { [one]: r };
     }
     if (method === 'PUT' && p.length === 2) {
+      if (p[0] === 'contacts') vatFields(body);
       if (['paid', 'partially_paid', 'void', 'closed'].includes(row.status) && one !== 'contact') throw err(400, 1040, 'Paid or void documents cannot be edited');
       const v = { ...body };
       if (one === 'contact' && v.contact_persons) {
