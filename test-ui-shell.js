@@ -25,7 +25,9 @@ async function launch() {
     proc.on('exit', c => rej(new Error(`browser exited (${c}): ${buf.slice(-400)}`)));
   });
   const port = new URL(wsUrl).port;
-  const page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(t => t.type === 'page');
+  let page;                                                   // Chrome may list its first page a moment after DevTools starts listening
+  for (let i = 0; i < 50 && !page; i++) { page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(t => t.type === 'page'); if (!page) await sleep(100); }
+  if (!page) throw new Error('the browser opened no page');
   ws = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
   ws.onmessage = m => { const d = JSON.parse(m.data); if (d.id && pending.has(d.id)) { const p = pending.get(d.id); pending.delete(d.id); d.error ? p.rej(new Error(JSON.stringify(d.error))) : p.res(d.result); } };
