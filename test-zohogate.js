@@ -185,7 +185,10 @@ server.listen(0, async () => {
     assert.equal(row('invoice', vInv).status, 'held'); assert.match(row('invoice', vInv).error, /^VAT_PENDING/); assert.equal(row('invoice', vInv).zoho_id, null);
     assert.equal(row('bill', vBill).status, 'held'); assert.match(row('bill', vBill).error, /^VAT_PENDING/);
     const pay = ctx.db.prepare("SELECT * FROM zoho_sync WHERE kind='payment'").get(); assert.equal(pay.status, 'held');
-    assert.equal(row('invoice', zInv).status, 'ok', 'the zero-rated invoice is sent'); assert.equal(row('bill', nBill).status, 'ok', 'the bill without VAT is sent');
+    assert.equal(row('invoice', zInv).status, 'ok', 'the zero-rated invoice is sent: ' + JSON.stringify(row('invoice', zInv)));
+    // contacts created while VAT is not set up in Zoho carry no VAT fields (Zoho refuses them: "Invalid Element tax_treatment")
+    const fromErp = () => T.contacts.filter(x => /Trigon ERP TRG-P\d+/.test(x.notes || ''));
+    assert.ok(fromErp().length >= 2, 'customer and supplier created'); assert.ok(fromErp().every(x => x.tax_treatment === undefined && x.tax_reg_no === undefined), 'no VAT fields before VAT is set up'); assert.equal(row('bill', nBill).status, 'ok', 'the bill without VAT is sent');
     assert.equal(T.invoices.length, 1); assert.ok(T.invoices.every(i => i.invoice_number !== ctx.enrich().invoices.find(x => x.id === vInv).number));
     assert.ok(T.bills.every(b => b.bill_number !== 'S-1'), 'the VAT bill never reached Zoho');
     const disp = ctx.db.prepare("SELECT * FROM zoho_sync WHERE kind='jv_asset' AND error LIKE 'ACCOUNTING_CHANGE_PENDING%'").get(); assert.ok(disp && disp.status === 'held', 'the disposal (6150) is held');
@@ -217,7 +220,11 @@ server.listen(0, async () => {
     ok(await call('POST', 'zoho/sync', {}));
     assert.equal(row('invoice', vInv).status, 'ok'); assert.equal(row('bill', vBill).status, 'ok'); assert.equal(ctx.db.prepare("SELECT status FROM zoho_sync WHERE kind='payment'").get().status, 'ok');
     assert.equal(ctx.db.prepare('SELECT status FROM zoho_sync WHERE id=?').get(disp.id).status, 'held', '6150 still deferred');
-    out.push('VAT configured in Zoho and adopted: gate READY, the held VAT records are sent; the disposal stays held until the 6150 accounting change');
+    // …and get them on the first run after VAT is set up: treatment for everyone, the TRN where there is one
+    const byName = n => fromErp().find(x => x.contact_name === n);
+    assert.equal(byName('Client Test').tax_treatment, 'vat_registered'); assert.equal(byName('Client Test').tax_reg_no, '100000000000003');
+    assert.equal(byName('Supplier Test').tax_treatment, 'vat_registered'); assert.equal(byName('Supplier Test').tax_reg_no, '100000000000011');
+    out.push('VAT configured in Zoho and adopted: gate READY, the held VAT records are sent, the contacts get their VAT treatment / TRN; the disposal stays held until the 6150 accounting change');
 
     console.log(out.map(x => '  ✔ ' + x).join('\n'));
     console.log('ZOHO GATE (VAT PENDING) TESTS PASSED');

@@ -221,10 +221,14 @@ module.exports = ctx => {
       bank: lk.bank && lk.bank.account_name, cash: lk.cash && lk.cash.account_name, expense: lk.cogs && lk.cogs.account_name }, missing };
   }
 
+  // VAT is set up in the Zoho organisation: its standard 5 % tax exists and the gate is not the "VAT pending" one
+  const vatInZoho = run => !vatPending() && !!(run && run.lk && run.lk.std);
   async function contactId(cl, partyId, run) {
     const p = run.e.parties[partyId]; if (!p) throw new Error('contact not found');
-    const vals = { contact_name: p.name, company_name: p.name, contact_type: p.type === 'client' ? 'customer' : 'vendor', tax_treatment: p.trn ? 'vat_registered' : 'vat_not_registered',
-      ...(p.trn ? { tax_reg_no: p.trn } : {}), billing_address: { address: p.address || '' }, notes: [`Trigon ERP TRG-P${p.id}`, p.notes].filter(Boolean).join('\n') };
+    // VAT fields (treatment, TRN) only once VAT is set up in Zoho: before that Zoho refuses them ("Invalid Element tax_treatment"). They are
+    // part of the hash, so every contact is updated with them on the first run after VAT is set up.
+    const vat = vatInZoho(run), vals = { contact_name: p.name, company_name: p.name, contact_type: p.type === 'client' ? 'customer' : 'vendor',
+      ...(vat ? { tax_treatment: p.trn ? 'vat_registered' : 'vat_not_registered', ...(p.trn ? { tax_reg_no: p.trn } : {}) } : {}), billing_address: { address: p.address || '' }, notes: [`Trigon ERP TRG-P${p.id}`, p.notes].filter(Boolean).join('\n') };
     const person = p.email || p.phone ? { first_name: p.name.slice(0, 100), email: p.email || '', phone: p.phone || '', is_primary_contact: true } : null;
     const h = hashOf([vals, person]), r = rec('contact', p.id);
     if (r && ['ok', 'error'].includes(r.status) && r.zoho_id) {
@@ -247,7 +251,7 @@ module.exports = ctx => {
     const m = mapOf('contact', 'sundry'); if (m) return m;
     const name = 'Sundry suppliers (Trigon ERP)';
     const found = ((await cl.get('/contacts', { contact_name: name })).contacts || []).find(x => x.contact_name === name);
-    const id = found ? found.contact_id : (await cl.post('/contacts', { contact_name: name, company_name: name, contact_type: 'vendor', tax_treatment: 'vat_not_registered', notes: 'Expenses entered in Trigon ERP without a supplier' })).contact.contact_id;
+    const id = found ? found.contact_id : (await cl.post('/contacts', { contact_name: name, company_name: name, contact_type: 'vendor', ...(vatInZoho(run) ? { tax_treatment: 'vat_not_registered' } : {}), notes: 'Expenses entered in Trigon ERP without a supplier' })).contact.contact_id;
     note('contact', 0, name, found ? 'link' : 'create', found ? 'the sundry suppliers contact already exists in Zoho — it would be used' : 'one vendor for bills entered without a supplier');
     if (!dry) db.prepare('INSERT INTO zoho_map(kind,local_key,zoho_id,label) VALUES(?,?,?,?) ON CONFLICT(kind,local_key) DO UPDATE SET zoho_id=excluded.zoho_id').run('contact', 'sundry', String(id), name);
     if (!found) run.sent++;
